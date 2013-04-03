@@ -2,10 +2,10 @@ import os, sys, socket, threading, SocketServer, time, traceback, copy
 from threading import Thread, Lock
 from datetime import datetime
 
-sDataArr=[]
 def utc():
     return int(datetime.utcnow().strftime("%s"))
 
+# transaction record
 class txobj:
     """Transaction object in transaction database"""
     txname=''          # Identifier of transaction
@@ -13,11 +13,13 @@ class txobj:
     startTime=0        # utc when participants -> 1
     fullTime=0         # utc when participants -> 2
     plist=[]           # participant list. Example: [['127.0.0.1', 88, id, type], ['192.168.1.1', 45, id, type]]
-    p1IP="0.0.0.0"     # participant #1 IP address
-    p1Port=0           # participant #1 port number
-    p2IP="0.0.0.0"     # participant #2 IP address
-    
     pSockets=[]        # [(socket, client_addr)]
+    params=[]
+    
+    def __init__(self):
+        self.plist=[]
+        self.pSockets=[]
+        self.params=[]
 
 # not used anymore, just for demonstration purposes
 class ThreadingUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer): 
@@ -67,6 +69,7 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                     tx.participants=1
                     tx.pSockets=[(socket, self.client_address)]
                     tx.plist=[(self.client_address[0], self.client_address[1], myid, mytype)]
+                    tx.params=[]
                 else:
                     tx = self.server.txdb[txid]
                     notInTransaction=True
@@ -82,15 +85,34 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                         tx.fullTime = utc()
                         tx.pSockets.append((socket, self.client_address))
                         tx.plist.append((self.client_address[0], self.client_address[1], myid, mytype))
-                self.server.txdb[txid] = tx
                 
-                if len(payload)>3:
+                
+                if len(payload)>3:    # analyze some parameters for transaction (delay for example)
                     for param in payload[3:]:
                         print "Analyzing parameter: ", param
+                        try:
+                            pname,pval = param.strip().split("=")
+                            tx.params.append((pname,pval))
+                        except Exception,e:
+                            print "Parameter error [%s]" % param, e
                 
+                self.server.txdb[txid] = tx
                 if tx.participants>=2: # if transaction is saturated, do some stuff
                     peers = ["%s;%s;%s;%s" % (p[0],p[1],p[2],p[3]) for p in tx.plist]
-                    txDescription="txstarted|"+txid+"|"+("|".join(peers))
+                    params = ["%s=%s" % (p[0], str(p[1])) for p in tx.params]
+                    
+                    
+                    fullDelay=0
+                    for pname,pval in tx.params:
+                        if "fullDelay" == pname:
+                            fullDelay=int(pval)
+                    
+                    if fullDelay!=0:
+                        print "Some full delay here, going to sleep %s ms" % fullDelay
+                        time.sleep(fullDelay/1000.0)
+                    
+                    txDescription="txstarted|"+txid+"|"+str(tx.startTime)+"|"+str(utc())+"|PEERS|"+("|".join(peers))+"|PARAMETERS|"+("|".join(params))
+                    print "Going to broadcast transaction to peers [[ %s ]]" % txDescription
                     for sock,addr in tx.pSockets:
                         sock.sendto(txDescription, addr)
                         print "Sending something to: ", addr
@@ -119,7 +141,7 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                             
         #self.request.sendall(response)        # TCP variant
 
-# threaded UDP server with central database
+# threaded UDP server with central transaction database
 class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
     txdb = {}           # Transaction database
     txdbLock = None     # mutex for transaction database
@@ -177,10 +199,7 @@ if __name__ == "__main__":
     server_thread.daemon = True
     server_thread.start()
     print "Server loop running in thread:", server_thread.name
-
     #client(ip, port, "Hello World 1")
-    #client(ip, port, "Hello World 2")
-    #client(ip, port, "Hello World 3")
 
     #server.shutdown()
     #server.serve_forever()
