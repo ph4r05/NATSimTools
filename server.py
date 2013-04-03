@@ -12,10 +12,12 @@ class txobj:
     participants=0     # number of participants in transaction. 0=empty transaction; 1=half/open; 2=established
     startTime=0        # utc when participants -> 1
     fullTime=0         # utc when participants -> 2
-    plist=[]           # participant list. Example: [['127.0.0.1', 88, type], ['192.168.1.1', 45, type]]
+    plist=[]           # participant list. Example: [['127.0.0.1', 88, id, type], ['192.168.1.1', 45, id, type]]
     p1IP="0.0.0.0"     # participant #1 IP address
     p1Port=0           # participant #1 port number
     p2IP="0.0.0.0"     # participant #2 IP address
+    
+    pSockets=[]        # [(socket, client_addr)]
 
 # not used anymore, just for demonstration purposes
 class ThreadingUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer): 
@@ -54,25 +56,61 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                 txid=payload[0].strip()
                 myid=payload[1].strip()
                 mytype=payload[2].strip()
+                tx=None
+                
                 print "Transaction start; txid=%s; pId=%s" % (txid, myid)
+                print self.server.txdb
                 if (txid in self.server.txdb)==False:
                     tx = txobj()
+                    tx.txname = txid
                     tx.startTime = utc()
                     tx.participants=1
-                    tx.plist.append((self.client_address[0], self.client_address[1],))
-                    
-                    
+                    tx.pSockets=[(socket, self.client_address)]
+                    tx.plist=[(self.client_address[0], self.client_address[1], myid, mytype)]
                 else:
-                    print "Existing transaction"
+                    tx = self.server.txdb[txid]
+                    notInTransaction=True
+                    for i,p in enumerate(copy.deepcopy(tx.plist)):  # check if is already present in transaction
+                        if myid==p[2]:  # if present, just update records for him 
+                            print "Already in transaction: [%s]" % myid, "list: ", tx.plist
+                            notInTransaction=False
+                            tx.pSockets[i]= (socket, self.client_address)
+                            tx.plist[i] = (self.client_address[0], self.client_address[1], myid, mytype)
+                            break
+                    if notInTransaction:    
+                        tx.participants = 2
+                        tx.fullTime = utc()
+                        tx.pSockets.append((socket, self.client_address))
+                        tx.plist.append((self.client_address[0], self.client_address[1], myid, mytype))
+                self.server.txdb[txid] = tx
                 
+                if len(payload)>3:
+                    for param in payload[3:]:
+                        print "Analyzing parameter: ", param
                 
-            elif action=='txsetup':
+                if tx.participants>=2: # if transaction is saturated, do some stuff
+                    peers = ["%s;%s;%s;%s" % (p[0],p[1],p[2],p[3]) for p in tx.plist]
+                    txDescription="txstarted|"+txid+"|"+("|".join(peers))
+                    for sock,addr in tx.pSockets:
+                        sock.sendto(txDescription, addr)
+                        print "Sending something to: ", addr
+                    print "Transaction broadcasted"
+                    
+                    self.server.txdb[txid] = None
+                    del self.server.txdb[txid]
+                    del tx
+                    print "Transaction deleted"
+                else:
+                    print "Waiting to saturate transaction [%s]" % txid                
+            elif action=='txsetup' and len(payload)>=2:
                 print "Transaction setup"
-                
-                
+                txid=payload[0].strip()
+                for params in payload[1:]:
+                    print "Param: %s" % params
+                socket.sendto(data.upper(), self.client_address)
             else:
                 print "Unknown command"
-            socket.sendto(data.upper(), self.client_address)
+                socket.sendto(data.upper(), self.client_address)
         except Exception,e:
             print "Some exception happened:", e
             traceback.print_exc()
@@ -98,12 +136,14 @@ class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
         try:
             curTime = utc()
             for i,p in enumerate(copy.deepcopy(self.txdb)):
-                if (p.participants==1 and (curTime-p.startTime)>60*5) \
-                or (p.participants==2 and (curTime-p.fullTime)>60*5):
+                tx = self.txdb[p]
+                if (tx.participants==1 and (curTime-tx.startTime)>60*10) \
+                or (tx.participants==2 and (curTime-tx.fullTime)>60*10):
                     print "Removing old transaction: %d" % i
-                    del self.txdb[i]
+                    del self.txdb[p]
         except Exception,e:
             print "Some exception during cleaning old transactions: ", e
+            traceback.print_exc()
         finally:
             self.txdbLock.release()
     pass
