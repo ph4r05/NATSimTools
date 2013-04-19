@@ -1,3 +1,4 @@
+
 import os, sys, socket, threading, SocketServer, time, traceback, copy
 from threading import Thread, Lock
 from datetime import datetime
@@ -48,7 +49,7 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
         print data
         
         # do some serious stuff
-        self.server.txdbLock.acquire()      # acquire mutex for transactions
+        self.server.txman.txdbLock.acquire()      # acquire mutex for transactions
         try:
             action, tail = data.split("|", 1)
             print "Action: [", action, "]; tail: [", tail
@@ -61,8 +62,8 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                 tx=None
                 
                 print "Transaction start; txid=%s; pId=%s" % (txid, myid)
-                print self.server.txdb
-                if (txid in self.server.txdb)==False:
+                print self.server.txman.txdb
+                if (txid in self.server.txman.txdb)==False:
                     tx = txobj()
                     tx.txname = txid
                     tx.startTime = utc()
@@ -71,7 +72,7 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                     tx.plist=[(self.client_address[0], self.client_address[1], myid, mytype)]
                     tx.params=[]
                 else:
-                    tx = self.server.txdb[txid]
+                    tx = self.server.txman.txdb[txid]
                     notInTransaction=True
                     for i,p in enumerate(copy.deepcopy(tx.plist)):  # check if is already present in transaction
                         if myid==p[2]:  # if present, just update records for him 
@@ -96,7 +97,7 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                         except Exception,e:
                             print "Parameter error [%s]" % param, e
                 
-                self.server.txdb[txid] = tx
+                self.server.txman.txdb[txid] = tx
                 if tx.participants>=2: # if transaction is saturated, do some stuff
                     peers = ["%s;%s;%s;%s" % (p[0],p[1],p[2],p[3]) for p in tx.plist]
                     params = ["%s=%s" % (p[0], str(p[1])) for p in tx.params]
@@ -118,8 +119,8 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
                         print "Sending something to: ", addr
                     print "Transaction broadcasted"
                     
-                    self.server.txdb[txid] = None
-                    del self.server.txdb[txid]
+                    self.server.txman.txdb[txid] = None
+                    del self.server.txman.txdb[txid]
                     del tx
                     print "Transaction deleted"
                 else:
@@ -137,20 +138,16 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
             print "Some exception happened:", e
             traceback.print_exc()
         finally:
-            self.server.txdbLock.release()
-                            
+            self.server.txman.txdbLock.release()
         #self.request.sendall(response)        # TCP variant
 
-# threaded UDP server with central transaction database
-class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
+# transaction manager shared among threaded servers
+class TXManager():
     txdb = {}           # Transaction database
     txdbLock = None     # mutex for transaction database
-    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
-        SocketServer.UDPServer.__init__(self, server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
+    
+    def __init__(self):
         self.txdbLock = Lock()
-        
-    def printMe(self):
-        print "Hello from server!"
     
     def cleanOldTxs(self):
         """Cleans old transactions"""
@@ -170,6 +167,16 @@ class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
             self.txdbLock.release()
     pass
 
+# threaded UDP server with central transaction database
+class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
+    txman = None
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
+        SocketServer.UDPServer.__init__(self, server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
+    def printMe(self):
+        print "Hello from server!"
+    def cleanOldTxs(self):
+        self.txman.cleanOldTxs()
+
 # simple client routine to connect to server and communicate something
 def client(ip, port, message):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) #socket.SOCK_STREAM)
@@ -187,7 +194,7 @@ def client(ip, port, message):
 
 if __name__ == "__main__":
     # Port 0 means to select an arbitrary unused port
-    HOST, PORT = "localhost", 9999
+    HOST, PORT, numServers = "localhost", 9999, 100
 
     server = ThreadedUDPServer((HOST, PORT), ThreadedUDPRequestHandler)
     ip, port = server.server_address
