@@ -174,8 +174,6 @@ class ThreadedUDPServer(SocketServer.ThreadingMixIn, SocketServer.UDPServer):
         SocketServer.UDPServer.__init__(self, server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
     def printMe(self):
         print "Hello from server!"
-    def cleanOldTxs(self):
-        self.txman.cleanOldTxs()
 
 # simple client routine to connect to server and communicate something
 def client(ip, port, message):
@@ -195,17 +193,21 @@ def client(ip, port, message):
 if __name__ == "__main__":
     # Port 0 means to select an arbitrary unused port
     HOST, PORT, numServers = "localhost", 9999, 100
-
-    server = ThreadedUDPServer((HOST, PORT), ThreadedUDPRequestHandler)
-    ip, port = server.server_address
-
-    # Start a thread with the server -- that thread will then start one
-    # more thread for each request
-    server_thread = threading.Thread(target=server.serve_forever)
-    # Exit the server thread when the main thread terminates
-    server_thread.daemon = True
-    server_thread.start()
-    print "Server loop running in thread:", server_thread.name
+    
+    # initialize common transaction manager for servers
+    txman = TXManager()
+    servers = []
+    for i in range(0, 100):
+        server = ThreadedUDPServer((HOST, PORT+i), ThreadedUDPRequestHandler)
+        server.txman = txman
+        ip, port = server.server_address
+        # Start a thread with the server -- that thread will then start one
+        # more thread for each request
+        server_thread = threading.Thread(target=server.serve_forever)
+        # Exit the server thread when the main thread terminates
+        server_thread.daemon = True
+        server_thread.start()
+        print "Server loop running in thread:", server_thread.name, "IP:port %s:%s" % (ip, port)
     #client(ip, port, "Hello World 1")
 
     #server.shutdown()
@@ -216,10 +218,10 @@ if __name__ == "__main__":
             time.sleep(1)
             # clean old transactions
             if (i % 5) == 0:
-                server.cleanOldTxs()
+                txman.cleanOldTxs()
             i = (i + 1) % 65535
     except Exception,e:
-        pass
+        print "Exception during cleaning old transactions; e: ", e
     print "Finishing process..."
     
     #server = SocketServer.UDPServer((HOST, PORT), ThreadingUDPServer)
