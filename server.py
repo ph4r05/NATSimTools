@@ -44,7 +44,7 @@ class ThreadedUDPRequestHandler(SocketServer.BaseRequestHandler):
         data = self.request[0].strip()           # Receive UDP message, stripped from white space on both ends
         socket = self.request[1]                 # Socket to send message back
         cur_thread = threading.current_thread()
-        response = "{}: {} Addr: {} Time: {}".format(cur_thread.name, data, str(self.client_address), utc())
+        response = "%s: %s Addr: %s Time: %s" % (cur_thread.name, data, str(self.client_address), utc())
         print response
         print data
         
@@ -192,7 +192,7 @@ def client(ip, port, message):
 
 if __name__ == "__main__":
     # Port 0 means to select an arbitrary unused port
-    HOST, PORT, numServers = "localhost", 9999, 100
+    HOST, PORT, numServers = "0.0.0.0", 9999, 100
     
     # initialize common transaction manager for servers
     txman = TXManager()
