@@ -348,14 +348,15 @@ class NatSimulation:
             #print "Offsets that would match without any further errors i=%02d; j=%02d" % (i, j)
             
             # now simulate the protocol, phase with port scanning
-            targetA = 2 * self.numCon * self.errors
-            targetB =     self.numCon * self.errors
+            #targetA = 2 * self.numCon * self.errors
+            #targetB =     self.numCon * self.errors
             
             mapA  = [{}, {}]                # mapping of the current port to index
             scanA = [set([]), set([])]      # list of a tuple (assigned port, destination port)
             portsA = [set([]), set([])]     # set of an allocated ports
             totalLagA = [0, 0]              # total number of errors during protocol
-            for i in range(0, max(targetA, targetB)):
+            foundSomething = False
+            for i in range(0, self.errors):
                 # A scan
                 #dstA  = b[i]#1*i #- stageChange*(stageNumA)/10.0# destination of scan o the other side
                 for party in [0,1]:
@@ -380,8 +381,9 @@ class NatSimulation:
                     mapA[party][curA] = i
                     #print "A scan: %d [%03d] --> [%03d] lag=%02d i=%03d toAdd=%s" % (party, curA, dstA, curLag, i, str(toAdd))
                     
-                    if stopOnFirstMatch and toAdd in scanA[party ^ 0x1]:    
-                        break
+                    if stopOnFirstMatch and toAdd in scanA[party ^ 0x1]: 
+                        foundSomething = True
+                if foundSomething: break
             
             print "totalLags [%02d %02d]" % (totalLagA[0], totalLagA[1])
             
@@ -406,7 +408,7 @@ class NatSimulation:
         
     def generateDot(self, portsA, portsB, scanA, scanB, res):
         '''
-        Generate DOT image
+        Generate DOT image for protocol run.
         '''
         
         dot = "digraph finite_state_machine {\n"
@@ -475,9 +477,37 @@ class NatSimulation:
         # generate SVG file
         print "GraphViz output: ", subprocess.Popen('neato -Tsvg < dotfile.dot > dotfile.svg', shell=True).communicate()[0]
     
+    def poolExhaustion(self, timeout, poolsize):
+        '''
+        Computes how long does it take to exhaust port pool given the new connection creation rate
+        
+        Related:
+            Simulates Poisson process with arrival times
+            source: http://www.columbia.edu/~ks20/4703-Sigman/4703-07-Notes-PP-NSPP.pdf
+        '''
+        t = 0.0
+        N = 0
+        while N <= poolsize:
+            # U ~ U(0,1), uniform distribution
+            U = random.random()
+            
+            # next time of the event, exponential distribution
+            t = t + (-(1/self.lmbd) * math.log(U))
+            if (N > poolsize): return t
+        
+            # increment the event counter
+            N = N + 1
+            #print "New event will occur: " + str(t) + ("; now events: %02d" % N)
+        print "Port pool will be exhausted in %05.3f ms = %05.3f s = %05.3f min = %05.3f h" % (t, t/1000.0, t/1000.0/60, t/1000.0/60/60)
+        return t 
+        
+    
 # main executable code    
 if __name__ == "__main__":
     ns = NatSimulation()
+    
+    print ns.poolExhaustion(3*60, 65535)
+    sys.exit()
     
     # create a symmetric nat both for Alice and Bob
     natA = SymmetricIncrementalNat()
