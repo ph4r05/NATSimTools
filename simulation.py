@@ -10,7 +10,9 @@ import random
 import math
 from operator import itemgetter, attrgetter
 import subprocess
-
+from optparse import OptionParser
+import copy
+from scipy.stats import poisson
 
 # Fibonacchi list generator
 def fibGenerator():
@@ -36,8 +38,8 @@ class Nat:
     Base abstract class for NAT allocation
     '''
     
-    # timeout of a created connection in seconds
-    timeout = 3*60
+    # timeout of a created connection in milli seconds
+    timeout = 3*60*1000
     
     # port pool available for new allocations
     pool = None
@@ -50,6 +52,8 @@ class Nat:
     def alloc(self, srcIP, srcPort, dstIP, dstPort, timeNow):
         raise Exception("Not implemented yet...") 
     def occupy(self, num, timeNow):
+        raise Exception("Not implemented yet...")
+    def freePorts(self):
         raise Exception("Not implemented yet...")
 
 class Quartet:
@@ -87,8 +91,10 @@ class Quartet:
         result = prime * result + self.dstPort
         return result
     
-
 class SymmetricNat(Nat):
+    '''
+    Base class for symmetric NAT. 
+    '''
     # allocation table for NAT; key = quartet; value = external port
     allocations = None 
     # port -> (quartet, expire time). Quartet may be null
@@ -113,7 +119,7 @@ class SymmetricNat(Nat):
         Uses port pool array and pointer to last allocated port to obtain next in the sequence.
         In case of random allocation randomly generates index to a pool and returns a port on the index.
         '''
-        return 0
+        raise Exception("Not implemented yet... This class is abstract, you have to override this method in subclass")
     
     def nextFreePort(self, timeNow):
         '''
@@ -136,7 +142,7 @@ class SymmetricNat(Nat):
                 else: continue                       # slot is in use, continue with search
             else: break                              # slot is free, assign
         # check if pool is exhausted - all ports are allocated currently
-        if tries == self.poolLen:
+        if tries >= self.poolLen or port==-1:
             raise Exception("Port pool exhausted")
         # return resulting port, should not be -1
         return port
@@ -175,6 +181,22 @@ class SymmetricNat(Nat):
             port = self.nextFreePort(timeNow)
             self.allocatedPorts[port] = (None, timeNow)
         return 1
+    
+    def freePorts(self):
+        return (self.poolLen - len(self.allocatedPorts))
+    
+    def trulyFreePorts(self, timeNow):
+        cp = copy.deepcopy(self.allocatedPorts)
+        for port in cp:
+            # next port is already allocated, what about timeout?
+            tup = self.allocatedPorts[port]
+            # check expiration first
+            if (tup[1] + self.timeout) < timeNow:
+                if (tup[0] != None):
+                        del self.allocations[tup[0]]       # expired -> delete from allocation table
+                del self.allocatedPorts[port]              # delete from allocation set
+        return self.freePorts()
+
 
 class SymmetricRandomNat(SymmetricNat):
     '''
@@ -248,7 +270,7 @@ class NatSimulation:
     # @see http://filebox.vt.edu/users/pasupath/papers/poisson_streams.pdf
     # @see http://www.math.wsu.edu/faculty/genz/416/lect/l05-45.pdf
     # @see http://preshing.com/20111007/how-to-generate-random-timings-for-a-poisson-process/
-    lmbd = 0.05
+    lmbd = 0.367
     
     # Number of miliseconds for silent period to take [ms].
     # Based on basic ping / round trip time it takes to communicate 
@@ -260,7 +282,7 @@ class NatSimulation:
     silentPeriodlmbd = 100
     
     # Number of rounds for simulation
-    simulationRounds = 1000
+    simulationRounds = 1
     
     # Number of errors that are handled by algorithm 
     errors = 1000
@@ -285,6 +307,19 @@ class NatSimulation:
             p = lmbd*t*p/N 
             F = F + p
         return N
+    
+    def poissonCDF(self, lmbd, x):
+        '''
+        Returns P(X <= x), X~Poisson(lmbd)
+        
+        P(X <= x) = e^{-lambda} * \sum_{i=0}^{k}{ \frac{lambda^i}{i!} }
+        '''
+        F = 1
+        res = 0
+        for i in range(0, x+1):
+            res = res + (math.pow(lmbd, i) / F)
+            F = F * (i+1)
+        return (math.exp(-lmbd) * res) 
     
     def getNumOfNewConnections(self, tim):
         '''
@@ -477,7 +512,10 @@ class NatSimulation:
         # generate SVG file
         print "GraphViz output: ", subprocess.Popen('neato -Tsvg < dotfile.dot > dotfile.svg', shell=True).communicate()[0]
     
-    def poolExhaustion(self, timeout, poolsize):
+    def poolExhaustionNat(self, natA, timeout):
+        return self.poolExhaustion(timeout, natA.poolLen, self.lmbd)
+    
+    def poolExhaustion(self, timeout, poolsize, lmbd):
         '''
         Computes how long does it take to exhaust port pool given the new connection creation rate
         
@@ -492,33 +530,187 @@ class NatSimulation:
             U = random.random()
             
             # next time of the event, exponential distribution
-            t = t + (-(1/self.lmbd) * math.log(U))
+            t = t + (-(1/lmbd) * math.log(U))
             if (N > poolsize): return t
         
             # increment the event counter
             N = N + 1
             #print "New event will occur: " + str(t) + ("; now events: %02d" % N)
         print "Port pool will be exhausted in %05.3f ms = %05.3f s = %05.3f min = %05.3f h" % (t, t/1000.0, t/1000.0/60, t/1000.0/60/60)
+        print "P(X > portPoolSize) = %02.3f where X~Poisson(timeout * lamda)" % (1.0-poisson.cdf(poolsize, lmbd * timeout))
         return t 
+    
+    def poolExhaustionEx(self, natA, timeout):
+        '''
+        Computes a simulation of port pool exhaustion of a NAT taking into consideration timeout.
+        It is the same thing like poolExhaustion in this way: if result from poolExhaustion is below timeout of the NAT, 
+        it will be exhausted with given setting. Otherwise some ports will timeout and NAT will never exhaust its pool size.
         
+        Corresponds to the sample of P(X >= poolSize), X~Poisson(timeout * lambda). X is number of new connections in 
+        the given timeout interval. This gives us probability that NAT will be exceeded.
+        '''
+        t = 0.0
+        N = 0
+        try:
+            while True:
+                # U ~ U(0,1), uniform distribution
+                U = random.random()
+                
+                # next time of the event, exponential distribution
+                nextEvt = (-(1/self.lmbd) * math.log(U)) 
+                t = t + nextEvt 
+                
+                # add new port allocation by that time
+                natA.occupy(1, t)
+            
+                # increment the event counter
+                N = N + 1
+                
+                if (N % 10000) == 0:
+                    freePorts = natA.trulyFreePorts(t)
+                    freeRatio = freePorts / float(natA.poolLen)
+                    print "New event will occur: " + str(t) + ("; now events: %02d; evt=%05.3f; freePorts=%d, %02.2f %%" % (N, nextEvt, freePorts, freeRatio))
+            
+        except Exception, e:
+            print "Port pool will be exhausted in %05.3f ms = %05.3f s = %05.3f min = %05.3f h" % (t, t/1000.0, t/1000.0/60, t/1000.0/60/60)
+            print "Exception: ", e
+            pass
+        
+        return 0
+    
+    def getLambdaExhaustionCDF(self, natA, prob):
+        '''
+        Gets lambda such that:
+        
+        P(X > poolsize) >= prob, X ~ Poisson(lambda * timeout)
+        '''
+        # at first we have to find proper interval where to find by binary search
+        timeout  = natA.timeout
+        poolsize = natA.poolLen
+        
+        lmbd = 1.0
+        lmbdL=-1
+        lmbdR=-1
+        
+        while (lmbdL==-1) or (lmbdR==-1):
+            probc = 1.0 - poisson.cdf(poolsize, lmbd * timeout)
+            print "current lambda: %02.3f ; prob=%02.3f" % (lmbd, probc)
+            
+            # left side of the interval. If fits, set and continue to find right side, otherwise keep left 
+            if lmbdL==-1:
+                if probc <= prob: 
+                    lmbdL = lmbd
+                    lmbd  = lmbd * 2.0
+                    continue
+                else: 
+                    lmbd = lmbd/2.0
+                    continue
+            
+            # right side of the interval, if here, we have left side and finding the right side
+            if probc > prob: 
+                lmbdR = lmbd
+                break
+            else:
+                lmbd = lmbd * 2.0
+        
+        print "Interval found: [%02.03f, %02.03f]" % (lmbdL, lmbdR)
+        return self.getLambdaExhaustionCDFinterval(timeout, poolsize, prob, lmbdL, lmbdR)
+        
+    def getLambdaExhaustionCDFinterval(self, timeout, poolsize, prob, l, r):
+        eps = 0.0001
+        while l < r:
+            c = (l+r)/2
+            probc = 1.0 - poisson.cdf(poolsize, c * timeout)
+            
+            print "\nNew iteration [%02.03f, %02.03f]; c=%02.3f probc=%02.3f vs. prob=%02.3f" % (l, r, c, probc, prob)
+            
+            if probc >= (prob-eps) and probc <= (prob+eps): break 
+            if probc < prob: l = c
+            if probc > prob: r = c
+        return l       
+    
+    def getLambdaExhaustion(self, natA):
+        '''
+        Get a lambda that will cause exhaustion for a given NAT
+        '''
+        # at first we have to find proper interval where to find by binary search
+        timeout  = natA.timeout
+        poolsize = natA.poolLen
+        
+        lmbd = 1.0
+        lmbdL=-1
+        lmbdR=-1
+        
+        while (lmbdL==-1) or (lmbdR==-1):
+            print "current lambda: %02.3f" % lmbd
+            t = self.poolExhaustion(timeout, poolsize, lmbd)
+            
+            # left side of the interval. If fits, set and continue to find right side, otherwise keep left 
+            if lmbdL==-1:
+                if t > timeout: 
+                    lmbdL = lmbd
+                    lmbd  = lmbd * 2.0
+                    continue
+                else: 
+                    lmbd = lmbd/2.0
+                    continue
+            
+            # right side of the interval, if here, we have left side and finding the right side
+            if t < timeout:
+                lmbdR = lmbd
+                break
+            else:
+                lmbd = lmbd * 2.0
+        
+        print "Interval found: [%02.03f, %02.03f]" % (lmbdL, lmbdR)
+        return self.getLambdaExhaustionInterval(timeout, poolsize, lmbdL, lmbdR)
+        
+    def getLambdaExhaustionInterval(self, timeout, poolsize, lmbdL, lmbdR):
+        '''
+        Recursive binary search for finding lambda that will exhaust port pool size
+        ''' 
+        eps = 100 # search epsilon, accuracy, 100ms
+        t   = 0
+        while True: #lmbdL < lmbdR and (lmbdR - lmbdL) > 0.0001:
+            
+            print "\nNew iteration [%02.03f, %02.03f]" % (lmbdL, lmbdR)
+            cLmbd = (lmbdL+lmbdR) / 2.0
+            t = self.poolExhaustion(timeout, poolsize, cLmbd)
+            
+            if t >= (timeout-eps) and t <= (timeout+eps): break 
+            if t < timeout: lmbdR = cLmbd
+            if t > timeout: lmbdL = cLmbd
+        return lmbdL
     
 # main executable code    
-if __name__ == "__main__":
+if __name__ == "__main__":    
     ns = NatSimulation()
-    
-    print ns.poolExhaustion(3*60, 65535)
-    sys.exit()
     
     # create a symmetric nat both for Alice and Bob
     natA = SymmetricIncrementalNat()
     natB = SymmetricIncrementalNat()
     
-    print "I2J Strategy: "
+    
     natA.init(None)
     natB.init(None)
     
-    strategy = FiboStrategy() #I2JStragegy()
+    print ns.poolExhaustionNat(natA, 3*60*1000)
+    
+    print "Lambda that will exhaust given NAT: "
+    lmbd = ns.getLambdaExhaustion(natA)
+    print "\nLambda that will exhaust given NAT: ", lmbd
+    
+    print ns.getLambdaExhaustionCDF(natA, 0.999)
+    sys.exit()
+    
+    print "I2J Strategy: "
+    strategy = FiboStrategy()
+    #strategy = I2JStragegy()
+    #strategy = TheirStragegy()
     strategy.init(None)
+    
+    # Their
+    #strategy.delta = [100, 100]
     
     ns.simulation(natA, natB, strategy)
     #ns.simulateThem()
