@@ -298,10 +298,10 @@ class PoissonStrategy(Strategy):
     def init(self, params=None): 
         #self.reset()
         self.gen()
-        print self.b
+        print self.b[0]
     
     def reset(self):
-        #self.gen()
+        self.gen()
         pass
     
     def gen(self):
@@ -314,14 +314,14 @@ class PoissonStrategy(Strategy):
             #self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.875)    )))
             #self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.875)    )))
             
-            self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*3.5)    )))
-            self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*3.5)    )))
+            self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.4)    )))
+            self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.4)    )))
             
-            #self.b[0] = list(set(self.b[0]))
-            #self.b[1] = list(set(self.b[1]))
-             
-            #self.b[0] = f7(self.b[0])
-            #self.b[1] = f7(self.b[1])
+        #self.b[0] = list(set(self.b[0]))
+        #self.b[1] = list(set(self.b[1]))
+         
+        #self.b[0] = f7(self.b[0])
+        #self.b[1] = f7(self.b[1])
         
     def silent(self,  time1, time2, lmbd):
         self.lmbd = lmbd
@@ -349,7 +349,7 @@ class NatSimulation:
     # @see http://filebox.vt.edu/users/pasupath/papers/poisson_streams.pdf
     # @see http://www.math.wsu.edu/faculty/genz/416/lect/l05-45.pdf
     # @see http://preshing.com/20111007/how-to-generate-random-timings-for-a-poisson-process/
-    lmbd = 0.01
+    lmbd = 0.2
     
     # Number of miliseconds for silent period to take [ms].
     # Based on basic ping / round trip time it takes to communicate 
