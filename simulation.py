@@ -13,6 +13,7 @@ import subprocess
 from optparse import OptionParser
 import copy
 from scipy.stats import poisson
+import numpy as np
 
 # Fibonacchi list generator
 def fibGenerator():
@@ -22,6 +23,11 @@ def fibGenerator():
         a, b = b, a + b
         yield a
             
+def f7(seq):
+    seen = set()
+    seen_add = seen.add
+    return [ x for x in seq if x not in seen and not seen_add(x)]
+
 class Strategy:
     '''
     Base abstract class for NAT strategy
@@ -32,6 +38,11 @@ class Strategy:
         self.init(None)
     def next(self, party, step):
         raise Exception("Not implemented yet...")   # return (srcPort, dstPort)
+    def silent(self, time1, time2, lmbd):
+        '''
+        Tells to strategy how long did silent period take just before start and guessed lambda.
+        '''
+        pass
 
 class Nat:
     '''
@@ -197,7 +208,6 @@ class SymmetricNat(Nat):
                 del self.allocatedPorts[port]              # delete from allocation set
         return self.freePorts()
 
-
 class SymmetricRandomNat(SymmetricNat):
     '''
     Symmetric NAT with random allocation function 
@@ -225,38 +235,107 @@ class SymmetricIncrementalNat(SymmetricNat):
         return self.pool[self.lastPort]                  # just a shortcut
 
 class TheirStragegy(Strategy):
-    delta = []
+    delta = [300,300]
     def init(self, params=None):
-        pass
+        pass    
     def next(self, party, step):
         if party==0: return (step,self.delta[0])
         if party==1: return (step,self.delta[1])
     
 class I2JStragegy(Strategy):
+    startPos=[0,0]
     def init(self, params=None):
         pass
+    def silent(self,  time1, time2, lmbd):
+        # Sets different starting point for algorithm than zero. Takes silent period
+        # duration into account together with predicted workload to start algorithm
+        # on a right place. It there are too many errors in the prediction (new connections)
+        # small-step-big-step can have problems with cathing them up.
+        #
+        # Use expected value instead of a random sample as a starting point. E(X) = lmbd, X ~ Po(lmbd)
+        # should be the central.
+        self.startPos=[int(lmbd * time1), int(lmbd * time2)]
+        #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
+        return self.startPos
+        
     def next(self, party, step):
-        if party==0: return (0,step)
-        if party==1: return (0,2*step)
+        if party==0: return (0, int(self.startPos[0]+step))
+        if party==1: return (0, int(self.startPos[1]+2*step))
         
 class FiboStrategy(Strategy):
     fibn = []
     b    = []
+    startPos=[0,0]
     def init(self, params=None):
         self.fibn = []
         fib = fibGenerator()
         for n in range(22):
             self.fibn.append(next(fib))
-        print self.fibn
+        print "Fibonacci sequence generated: ", self.fibn
         
         for i in range(1, len(self.fibn)-1):
             for j in range(0, self.fibn[i-1]):
                 self.b.append(self.fibn[i+1] + j)
         print self.b
+        #sys.exit(1)
+        
     def reset(self):
         pass
+    def silent(self,  time1, time2, lmbd):
+        self.startPos=[int(lmbd * time1), int(lmbd * time2)]
+        #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
+        return self.startPos
     def next(self, party, step):
-        return (0, self.b[step])
+        if party==0: return (0, self.startPos[party] +   self.b[step])
+        if party==1: return (0, self.startPos[party] + 2*self.b[step])
+        return
+
+class PoissonStrategy(Strategy):
+    startPos=[0,0]
+    lmbd = 0.01
+    
+    b = [[],[]]
+    def init(self, params=None): 
+        #self.reset()
+        self.gen()
+        print self.b
+    
+    def reset(self):
+        #self.gen()
+        pass
+    
+    def gen(self):
+        self.b = [[],[]]
+        for step in range(0,1001):
+            #x = int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.775)    ))
+            #self.b[0].append(x)
+            #self.b[1].append(x)
+            
+            #self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.875)    )))
+            #self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.875)    )))
+            
+            self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*3.5)    )))
+            self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*3.5)    )))
+            
+            #self.b[0] = list(set(self.b[0]))
+            #self.b[1] = list(set(self.b[1]))
+             
+            #self.b[0] = f7(self.b[0])
+            #self.b[1] = f7(self.b[1])
+        
+    def silent(self,  time1, time2, lmbd):
+        self.lmbd = lmbd
+        self.startPos=[int(lmbd * time1), int(lmbd * time2)] # expected value
+        #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]        
+        return self.startPos
+    
+    def next(self, party, step):
+        #return (0, int(self.startPos[party] + NatSimulation.poisson(self.lmbd, 10 * (1+step*1.77)    )))
+        
+        return (0, int(self.startPos[party] + self.b[party][step]))
+        
+        #self.startPos[party] += 1+NatSimulation.poisson(self.lmbd, 10)#*(1+step*0.77))
+        #return (0, int(self.startPos[party]))
 
 class NatSimulation:
     
@@ -270,19 +349,19 @@ class NatSimulation:
     # @see http://filebox.vt.edu/users/pasupath/papers/poisson_streams.pdf
     # @see http://www.math.wsu.edu/faculty/genz/416/lect/l05-45.pdf
     # @see http://preshing.com/20111007/how-to-generate-random-timings-for-a-poisson-process/
-    lmbd = 0.367
+    lmbd = 0.01
     
     # Number of miliseconds for silent period to take [ms].
     # Based on basic ping / round trip time it takes to communicate 
     # IP with another peer 
-    silentPeriodBase = 500
+    silentPeriodBase = 1000
     
     # Lambda for Pois(lmbd) for silent period variability.
     # Silent period time = silentPeriodBase + Pois(lmbd) [ms]
     silentPeriodlmbd = 100
     
     # Number of rounds for simulation
-    simulationRounds = 1
+    simulationRounds = 1000
     
     # Number of errors that are handled by algorithm 
     errors = 1000
@@ -293,7 +372,22 @@ class NatSimulation:
     # number of connections to establish
     numCon = 1
     
-    def poisson(self, lmbd, t):
+    # very compact output
+    compact=True
+    
+    @staticmethod
+    def poisson(lmbd, t):
+        '''
+        Uses Numpy package to take sample from poisson distribution
+        '''
+        return int(np.random.poisson(lmbd*t, 1)[0])
+    
+    @staticmethod
+    def uniform(lmbd, t):
+        return random.random() * lmbd * t
+    
+    @staticmethod
+    def poissonSample(lmbd, t):
         '''
         Generates number of events in Poisson process in time [0, t]
         source: http://www.math.wsu.edu/faculty/genz/416/lect/l05-45.pdf
@@ -348,6 +442,7 @@ class NatSimulation:
             print "New event will occur: " + str(t) + ("; now events: %02d" % N) 
         
         return N
+
     
     def simulation(self, natA, natB, strategy):
         '''
@@ -357,6 +452,8 @@ class NatSimulation:
         nats = [natA, natB]
         successCnt = 0.0
         stopOnFirstMatch = self.simulationRounds != 1
+        
+        successAcc = [0,0]              # accumulator for steps needed to connect if successfully
         for sn in range(0, self.simulationRounds):
             # reset NATs
             nats[0].reset()
@@ -366,12 +463,13 @@ class NatSimulation:
             # generate silent period time
             curSilentA = self.silentPeriodBase + self.poisson(self.silentPeriodlmbd, 1)
             curSilentB = self.silentPeriodBase + self.poisson(self.silentPeriodlmbd, 1)
-            print "\n##%03d. Current silent period time: [%03.3f, %03.3f]" % (sn, curSilentA, curSilentB) 
+            
+            if not self.compact:
+                print "\n##%03d. Current silent period time: [%03.3f, %03.3f]" % (sn, curSilentA, curSilentB) 
             
             # generate new TCP connections for silent period on both sides, same lambda.
             kA = self.poisson(self.lmbd, curSilentA)
             kB = self.poisson(self.lmbd, curSilentB)
-            print "New connections meanwhile silent period [%02d, %02d]" % (kA, kB)
             
             # reflect errors to NAT allocation
             nats[0].occupy(kA, 0)
@@ -386,12 +484,17 @@ class NatSimulation:
             #targetA = 2 * self.numCon * self.errors
             #targetB =     self.numCon * self.errors
             
+            # set silent period duration to the strategy
+            sData = []
+            sData = strategy.silent(curSilentA, curSilentB, self.lmbd)
+            
             mapA  = [{}, {}]                # mapping of the current port to index
             scanA = [set([]), set([])]      # list of a tuple (assigned port, destination port)
             portsA = [set([]), set([])]     # set of an allocated ports
             totalLagA = [0, 0]              # total number of errors during protocol
             foundSomething = False
             for i in range(0, self.errors):
+                
                 # A scan
                 #dstA  = b[i]#1*i #- stageChange*(stageNumA)/10.0# destination of scan o the other side
                 for party in [0,1]:
@@ -420,7 +523,8 @@ class NatSimulation:
                         foundSomething = True
                 if foundSomething: break
             
-            print "totalLags [%02d %02d]" % (totalLagA[0], totalLagA[1])
+            if not self.compact:
+                print "New connections meanwhile silent period [%02d, %02d]; " % (kA, kB), "start=", sData, "; totalLags [%02d %02d]" % (totalLagA[0], totalLagA[1])
             
             # OK is there any intersection in both sets?
             res = list(scanA[0].intersection(scanA[1]))
@@ -432,14 +536,32 @@ class NatSimulation:
                 self.generateDot(portsA[0], portsA[1], scanA[0], scanA[1], res)
             
             if (len(res) == 0): 
-                print "Algorithm failed, no intersecting points"
+                if not self.compact:
+                    print "Algorithm failed, no intersecting points"
+                else:
+                    sys.stdout.write('.')
+                    sys.stdout.flush()
                 continue
             
-            print "RES: ", res, "i=%02d" % mapA[0][res[0][0]], "; j=%02d" % mapA[1][res[0][1]]
+            if not self.compact: 
+                print "RES: ", res, "i=%02d" % mapA[0][res[0][0]], "; j=%02d" % mapA[1][res[0][1]]
+            else:
+                sys.stdout.write('X')
+                sys.stdout.flush()
+            
             successCnt += 1.0
+            successAcc[0] += mapA[0][res[0][0]]
+            successAcc[1] += mapA[1][res[0][1]]
             
-            
-        print "Success count: %02.3f ; cnt=%d" % (successCnt / self.simulationRounds, successCnt)
+        # Report results after simulation is done
+        print "\nSuccess count: %02.3f ; cnt=%d; lmbd=%01.3f; scanInterval=%d ms; base sleep=%d; average steps: %04.3f %04.3f" % \
+            (successCnt / self.simulationRounds, 
+             successCnt, 
+             self.lmbd, 
+             self.portScanInterval, 
+             self.silentPeriodBase,
+             successAcc[0] / successCnt,
+             successAcc[1] / successCnt)
         
     def generateDot(self, portsA, portsB, scanA, scanB, res):
         '''
@@ -671,7 +793,7 @@ class NatSimulation:
         ''' 
         eps = 100 # search epsilon, accuracy, 100ms
         t   = 0
-        while True: #lmbdL < lmbdR and (lmbdR - lmbdL) > 0.0001:
+        while lmbdL < lmbdR and (lmbdR - lmbdL) > 0.00001:
             
             print "\nNew iteration [%02.03f, %02.03f]" % (lmbdL, lmbdR)
             cLmbd = (lmbdL+lmbdR) / 2.0
@@ -690,27 +812,31 @@ if __name__ == "__main__":
     natA = SymmetricIncrementalNat()
     natB = SymmetricIncrementalNat()
     
-    
     natA.init(None)
     natB.init(None)
     
-    print ns.poolExhaustionNat(natA, 3*60*1000)
-    
-    print "Lambda that will exhaust given NAT: "
-    lmbd = ns.getLambdaExhaustion(natA)
-    print "\nLambda that will exhaust given NAT: ", lmbd
-    
-    print ns.getLambdaExhaustionCDF(natA, 0.999)
-    sys.exit()
+ #   print ns.poolExhaustionNat(natA, 3*60*1000)
+#    
+#    print "Lambda that will exhaust given NAT: "
+#    lmbd = ns.getLambdaExhaustion(natA)
+#    print "\nLambda that will exhaust given NAT: ", lmbd
+#    
+#    print ns.getLambdaExhaustionCDF(natA, 0.999)
+#    sys.exit()
     
     print "I2J Strategy: "
-    strategy = FiboStrategy()
+    #strategy = FiboStrategy()
     #strategy = I2JStragegy()
     #strategy = TheirStragegy()
+    #print NatSimulation.poisson(0.1, 10000)
+    
+    #poisson.pmf(k)
+    
+    strategy  = PoissonStrategy()
     strategy.init(None)
     
     # Their
-    #strategy.delta = [100, 100]
+    #strategy.delta = [200, 200]
     
     ns.simulation(natA, natB, strategy)
     #ns.simulateThem()
