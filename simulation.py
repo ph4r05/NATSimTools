@@ -14,6 +14,9 @@ from optparse import OptionParser
 import copy
 from scipy.stats import poisson
 import numpy as np
+import matplotlib.pyplot as plt
+import time
+import argparse
 
 # Fibonacchi list generator
 def fibGenerator():
@@ -34,7 +37,7 @@ class Strategy:
     '''
     def init(self, params=None):
         raise Exception("Not implemented yet...")
-    def reset(self, params=None):
+    def reset(self, nats=[], sim=None, params=None):
         self.init(None)
     def next(self, party, step):
         raise Exception("Not implemented yet...")   # return (srcPort, dstPort)
@@ -235,7 +238,7 @@ class SymmetricIncrementalNat(SymmetricNat):
         return self.pool[self.lastPort]                  # just a shortcut
 
 class TheirStragegy(Strategy):
-    delta = [300,300]
+    delta = [1000,1000]
     def init(self, params=None):
         pass    
     def next(self, party, step):
@@ -254,7 +257,7 @@ class I2JStragegy(Strategy):
         #
         # Use expected value instead of a random sample as a starting point. E(X) = lmbd, X ~ Po(lmbd)
         # should be the central.
-        self.startPos=[int(lmbd * time1), int(lmbd * time2)]
+        #self.startPos=[int(lmbd * time1), int(lmbd * time2)]
         #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
         return self.startPos
         
@@ -270,19 +273,15 @@ class FiboStrategy(Strategy):
         self.fibn = []
         fib = fibGenerator()
         for n in range(22):
-            self.fibn.append(next(fib))
-        print "Fibonacci sequence generated: ", self.fibn
-        
+            self.fibn.append(next(fib))        
         for i in range(1, len(self.fibn)-1):
             for j in range(0, self.fibn[i-1]):
+                #int(NatSimulation.poisson(0.1, 10 * (1+self.fibn[i+1] + j)    ))
                 self.b.append(self.fibn[i+1] + j)
-        print self.b
         #sys.exit(1)
-        
-    def reset(self):
-        pass
+    
     def silent(self,  time1, time2, lmbd):
-        self.startPos=[int(lmbd * time1), int(lmbd * time2)]
+        #self.startPos=[int(lmbd * time1), int(lmbd * time2)]
         #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
         return self.startPos
     def next(self, party, step):
@@ -292,30 +291,65 @@ class FiboStrategy(Strategy):
 
 class PoissonStrategy(Strategy):
     startPos=[0,0]
-    lmbd = 0.01
+    nats = None
+    sim  = None
+    lmbd = 0.1
+    dupl = False
+    coef = 1.4773
     
     b = [[],[]]
     def init(self, params=None): 
         #self.reset()
         self.gen()
-        print self.b[0]
+        #print self.b[0], "len=", len(self.b[0])
     
-    def reset(self):
+    def reset(self, nats=[], sim=None, params=[]):
+        self.sim = sim
+        
+        if len(nats)==2: self.nats = nats
+        if self.sim!=None: self.lmbd = sim.lmbd
+        
         self.gen()
         pass
     
-    def gen(self):
-        self.b = [[],[]]
-        for step in range(0,1001):
-            #x = int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.775)    ))
-            #self.b[0].append(x)
-            #self.b[1].append(x)
-            
+    def genPart(self, party):
+        # lambda on both sides
+        lmbd = self.sim.lmbd if self.sim!=None else self.lmbd
+        
+        # port scan interval from simulation
+        t = self.sim.portScanInterval if self.sim != None else 10
+        
+        b    = []             # local array
+        seen = set()          # duplicity check
+        seen_add = seen.add
+        
+        for step in range(0, 3001):     
             #self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.875)    )))
             #self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.875)    )))
             
-            self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.4)    )))
-            self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.4)    )))
+            #self.b[0].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.778)    )))
+            #self.b[1].append(int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.778)    )))
+            
+            # dupl = False, lmbd=0.01, t=10
+            #x = int(NatSimulation.poisson(lmbd, t * (1+step*4.5)    ))
+            
+            # dupl = False, lmbd=0.01, t=10
+            #x = int(NatSimulation.poisson(self.lmbd, 10 * (1+step*5.5)    ))
+            
+            # dupl=True, lmbd=0.1, t=10
+            #x = int(NatSimulation.poisson(self.lmbd, 10 * (1+step*1.778)    ))
+            
+            # dupl=False, lmbd=0.1, t=10
+            #x = int(NatSimulation.poisson(self.lmbd, t * (1+step*1.485)    ))
+            
+            x  = round(step * 2.03) 
+            #x = int(NatSimulation.poisson(lmbd, t * (1+step*self.coef)    ))
+            if self.dupl or (x not in seen and not seen_add(x)): 
+                b.append(x)
+        return b
+                
+    def gen(self):
+        self.b = [self.genPart(0), self.genPart(1)]
             
         #self.b[0] = list(set(self.b[0]))
         #self.b[1] = list(set(self.b[1]))
@@ -331,8 +365,7 @@ class PoissonStrategy(Strategy):
     
     def next(self, party, step):
         #return (0, int(self.startPos[party] + NatSimulation.poisson(self.lmbd, 10 * (1+step*1.77)    )))
-        
-        return (0, int(self.startPos[party] + self.b[party][step]))
+        return (0, int(self.startPos[party] + self.b[party][min(step, len(self.b[party])-1)]))
         
         #self.startPos[party] += 1+NatSimulation.poisson(self.lmbd, 10)#*(1+step*0.77))
         #return (0, int(self.startPos[party]))
@@ -349,19 +382,23 @@ class NatSimulation:
     # @see http://filebox.vt.edu/users/pasupath/papers/poisson_streams.pdf
     # @see http://www.math.wsu.edu/faculty/genz/416/lect/l05-45.pdf
     # @see http://preshing.com/20111007/how-to-generate-random-timings-for-a-poisson-process/
-    lmbd = 0.2
+    lmbd = 0.1
     
     # Number of miliseconds for silent period to take [ms].
     # Based on basic ping / round trip time it takes to communicate 
     # IP with another peer 
-    silentPeriodBase = 1000
+    silentPeriodBase = 0#1000
     
     # Lambda for Pois(lmbd) for silent period variability.
     # Silent period time = silentPeriodBase + Pois(lmbd) [ms]
-    silentPeriodlmbd = 100
+    silentPeriodlmbd = 0#100
     
     # Number of rounds for simulation
     simulationRounds = 1000
+    
+    # how many rounds has fast simulation? Fast is extended to deep simulation if it has
+    # more than 50% probability of success
+    simulationRoundsFast = 100  
     
     # Number of errors that are handled by algorithm 
     errors = 1000
@@ -420,7 +457,7 @@ class NatSimulation:
         Simple wrapper for poission. Returns number of new connections
         created. It is assumed they are distributed according to Poisson distribution.
         '''
-        return self.poisson(self.lmbd, tim)
+        return int(np.random.poisson(self.lmbd*tim, 1)[0])
     
     def poissonSimulate(self, T):
         '''
@@ -442,7 +479,126 @@ class NatSimulation:
             print "New event will occur: " + str(t) + ("; now events: %02d" % N) 
         
         return N
+  
+    def coefFinder(self, natA, natB, strategy, baseStep=0.10, start=0.1, maxc=15.0, epsdiff=0.25, maxp_acc=0.1, depth=0):
+        '''
+        Finds coefficient that maximizes probability of establishing connection for Poisson strategy
+        '''
+        
+        probs = {}
+        curc = start
+        
+        maxp   = 0.0
+        maxcur = curc
+        resm   = None
+        
+        minp   = 1.0
+        mincur = curc
+        
+        bpoint = curc
+        
+        # Scanning with small step
+        # TODO: if scanning step is too big and it is not possible to find the peak
+        # in probability function step has to be smaller and interval re-scanned to
+        # find desired maximum. 
+        while curc < maxc:
+            strategy.coef = curc    # sets current coefficient to strategy
+            
+            sys.stdout.write(" curc=%03.4f; " % curc)
+            res = self.simulation(natA, natB, strategy)
+            probs[curc] = res[0]
+            
+            if res[0] > maxp:
+                maxp = res[0]
+                maxcur = curc
+                resm   = res
+                
+            if res[0] < minp:
+                minp = res[0]
+                mincur = curc
+            
+            # check if we are performing worse than before
+            if maxp >= maxp_acc and maxp > res[0] and abs(maxp-res[0]) >= epsdiff:
+                print "; We are getting worse...; "
+                bpoint = curc
+                break
+            # too good solution
+            if maxp >= 0.99: break
+            
+            curc += baseStep    # increment current coefficient in strategy to the next round        
+        print probs
+        
+        # Coefficient binary finding, maximum should be somewhere in the middle
+        #print self.coefFinderInterval(natA, natB, strategy, bpoint-3*baseStep, bpoint, 0)
+        
+        # recursive call on this function - try finer step
+        if maxp > 0.99 or depth >= 3:
+            print "Ending recursion; max=%03.4f bp=%03.4f" % (maxp, maxcur)
+            return (maxp, curc, resm[2] if resm != None else '0') 
+        else:
+            return self.coefFinder(natA, natB, strategy, baseStep/10.0, maxcur-2*baseStep, maxcur+2*baseStep, epsdiff/1.0, maxp, depth+1)
+        
+        pass
+  
+    def coefFinderInterval(self, natA, natB, strategy, cl, cr, step=0, prec=0.001):
+        '''
+        Recursive binary search for finding coefficient that maximizes probability of successful connection establishment
+        ''' 
+        eps = 100 # search epsilon, accuracy, 100ms
+        t   = 0
+        
+        stepNull = step==0
+        cc       = 0
+        while cl < cr and (cr - cl) > 0.0001:
+            if stepNull: step=(cr-cl) / 20.0
+            cc = cl + (cr-cl) / 2.0
 
+            # mid-1
+            strategy.coef = cc-step
+            sys.stdout.write("c-1 [%02.03f, %02.03f] curc=%03.4f; " % (cl, cr, strategy.coef))
+            res_cm = self.simulation(natA, natB, strategy)
+            
+            # mid
+            strategy.coef = cc
+            sys.stdout.write("c   [%02.03f, %02.03f] curc=%03.4f; " % (cl, cr, strategy.coef))
+            res_c = self.simulation(natA, natB, strategy)
+            
+            #mid+1
+            strategy.coef = cc+step
+            sys.stdout.write("c+1 [%02.03f, %02.03f] curc=%03.4f; " % (cl, cr, strategy.coef))
+            res_cp = self.simulation(natA, natB, strategy)
+            
+            print ""
+            sys.stdout.flush()
+            
+            # decision which path to take
+            if res_cm[0] >= 0.99:
+                return cc-step
+            elif res_cp[0] >= 0.99:
+                return cc+step
+            elif res_c[0] >= 0.99:
+                return cc
+            elif res_cm[0] <= res_c[0] and res_c[0] >= res_cp[0]: # middle is peak; could return already but we might obtain better peak by "zooming"
+                print "shrinking interval"
+                cl = cl + (cr-cl) / 4.0
+                cr = cr - (cr-cl) / 4.0
+            elif res_cm[0] >= res_c[0] and res_c[0] <= res_cp[0]: # middle is low-peak;
+                if res_cm[0] >= res_cp[0]:   # if left side is bigger
+                    print "lowpeak, going left..."
+                    cr = cc-step
+                else:                       # right side is bigger
+                    print "lowpeak, going right..." 
+                    cl = cc+step
+            elif res_cm[0] >= res_c[0]:
+                print "going left..."
+                cr = cc-step
+            elif res_cp[0] >= res_c[0]:
+                print "going right..."
+                cl = cc+step
+            else:
+                print "dafuq?"
+                return cc   
+        return cc
     
     def simulation(self, natA, natB, strategy):
         '''
@@ -452,13 +608,16 @@ class NatSimulation:
         nats = [natA, natB]
         successCnt = 0.0
         stopOnFirstMatch = self.simulationRounds != 1
+        getTime = lambda: int(round(time.time() * 1000))
+        simStart = getTime()
         
         successAcc = [0,0]              # accumulator for steps needed to connect if successfully
+        realRounds = self.simulationRounds
         for sn in range(0, self.simulationRounds):
             # reset NATs
             nats[0].reset()
             nats[1].reset()
-            strategy.reset()
+            strategy.reset(nats, self)
             
             # generate silent period time
             curSilentA = self.silentPeriodBase + self.poisson(self.silentPeriodlmbd, 1)
@@ -541,6 +700,16 @@ class NatSimulation:
                 else:
                     sys.stdout.write('.')
                     sys.stdout.flush()
+                    
+            # Stop early if poor performance
+            if False and sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast:
+                sys.stdout.write('Z')
+                sys.stdout.flush()
+                realRounds = sn+1
+                break
+            
+            # fail -> nothing to do now
+            if (len(res) == 0): 
                 continue
             
             if not self.compact: 
@@ -552,17 +721,26 @@ class NatSimulation:
             successCnt += 1.0
             successAcc[0] += mapA[0][res[0][0]]
             successAcc[1] += mapA[1][res[0][1]]
+        
+        simEnd = getTime()
+        simTotal = simEnd - simStart    
             
         # Report results after simulation is done
-        print "\nSuccess count: %02.3f ; cnt=%d; lmbd=%01.3f; scanInterval=%d ms; base sleep=%d; average steps: %04.3f %04.3f" % \
-            (successCnt / self.simulationRounds, 
+        print "\nSuccess count: %02.3f ; cnt=%03d; lmbd=%01.3f; scanInterval=%04d ms; base sleep=%04d; average steps: %04.3f %04.3f; time elapsed=%04.3f s" % \
+            (successCnt / realRounds    if realRounds > 0 else 0, 
              successCnt, 
              self.lmbd, 
              self.portScanInterval, 
              self.silentPeriodBase,
-             successAcc[0] / successCnt,
-             successAcc[1] / successCnt)
+             successAcc[0] / successCnt if successCnt > 0 else 0,
+             successAcc[1] / successCnt if successCnt > 0 else 0,
+             simTotal/1000.0)
         
+        return (successCnt / realRounds    if realRounds > 0 else 0, 
+                successCnt, 
+                successAcc[0] / successCnt if successCnt > 0 else 0,
+                successAcc[1] / successCnt if successCnt > 0 else 0,)
+    
     def generateDot(self, portsA, portsB, scanA, scanB, res):
         '''
         Generate DOT image for protocol run.
@@ -804,8 +982,62 @@ class NatSimulation:
             if t > timeout: lmbdL = cLmbd
         return lmbdL
     
+    def portDistributionFunction(self, lmbd, t, pstep):
+        '''
+        Measures distribution function of the ports on NAT with Poisson process.
+        This matters since the whole nature of NAT is incremental. Number of 
+        new connections in different time windows should hold distribution also
+        considered together, Po(lmbd*(t1+t2)), but considering port numbers it 
+        makes a difference, also taking my port allocation into account. 
+        
+        For instance port 6 can be reached by 2,2,2 or 3,3. 
+        '''
+        ports = 1000
+        portDistrib = []
+        for i in range(0, ports): portDistrib.append(0)
+        for sn in range(0, 10000): # self.simulationRounds):
+            
+            ports = []
+            step    = 0
+            curPort = 0
+            while curPort < ports:
+                if(curPort!=0 and pstep!=-1 and step==pstep):
+                    portDistrib[curPort] += 1        # port is used
+                
+                curPort += self.poisson(lmbd, t) # add new connections by Poisson process
+                curPort += 1                     # add my port, I made it by a new connection
+                step    += 1
+                
+                ports.append(curPort)
+        pass
+    
+        print "Here comes a histogram..."
+        #hist = np.histogram(portHist, bins=range(0, ports))
+        
+        pos = np.arange(ports)
+        width = 1.0     # gives histogram aspect to the bar diagram
+        
+        ax = plt.axes()
+        ax.set_xticks(pos + (width / 2))
+        ax.set_xticklabels(range(0, ports))
+        
+        plt.bar(pos, portDistrib, width, color='r')
+        plt.show()
+    
+        
+    
 # main executable code    
-if __name__ == "__main__":    
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='NAT simulator.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-o','--output',help='Output file name from finder', required=False, default='graph.txt')
+    parser.add_argument('-t','--space',help='Time in ms to wait between packet send', required=False, default=10, type=int)
+    parser.add_argument('-l','--lmbd_start',help='On which lambda to start', required=False, default=-1, type=float)
+    parser.add_argument('-s','--strategy',help='Strategy to use (poisson, i2j, fibo, their)', required=False, default='poisson')
+    args = parser.parse_args()
+    
     ns = NatSimulation()
     
     # create a symmetric nat both for Alice and Bob
@@ -824,21 +1056,58 @@ if __name__ == "__main__":
 #    print ns.getLambdaExhaustionCDF(natA, 0.999)
 #    sys.exit()
     
-    print "I2J Strategy: "
-    #strategy = FiboStrategy()
-    #strategy = I2JStragegy()
-    #strategy = TheirStragegy()
-    #print NatSimulation.poisson(0.1, 10000)
-    
-    #poisson.pmf(k)
-    
-    strategy  = PoissonStrategy()
+    if args.strategy == 'i2j':
+        print "I2J Strategy: "
+        strategy = I2JStragegy()
+    elif args.strategy == 'fibo':
+        print "Fibonacci strategy"
+        strategy = FiboStrategy()
+    elif args.strategy == 'their':
+        print "Their strategy"
+        strategy = TheirStragegy()
+    elif args.strategy == 'poisson':
+        print "Poisson strategy"    
+        strategy  = PoissonStrategy()
     strategy.init(None)
     
     # Their
     #strategy.delta = [200, 200]
+
+    ns.portDistributionFunction(0.2, 10, 60)
+    sys.exit(3)
     
+    #strategy.dupl = True
+    #strategy.coef = 1.8
     ns.simulation(natA, natB, strategy)
+    sys.exit(3)
+    
+    # generating graph for moving lambda
+    f = open(args.output, 'a+')
+    ns.portScanInterval = args.space
+    
+    f.write("New start at %s; scanInterval=%d; strategy=%s\n" % (time.time(), ns.portScanInterval, args.strategy))
+    print "Scanning port interval: %d" % ns.portScanInterval
+    
+    lmbdArr = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, \
+               0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, \
+               0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, \
+               0.2, 0.21, 0.22, 0.23, 0.24, 0.25]
+    for clmb in lmbdArr:
+        print "# Current lambda: %03.4f" % clmb
+        if args.lmbd_start!=-1 and clmb < args.lmbd_start: continue
+        
+        ns.lmbd = clmb
+        try:
+            if args.strategy == 'poisson':
+                res = ns.coefFinder(natA, natB, strategy, 0.10, 0.1)
+                f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[1])) # python will convert \n to os.linesep
+            else:
+                res = ns.simulation(natA, natB, strategy)
+                f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[2])) # python will convert \n to os.linesep
+            f.flush()
+        except Exception, e:
+            print "Exception!", e
+    f.close()
     #ns.simulateThem()
     
 
