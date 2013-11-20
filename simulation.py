@@ -317,6 +317,58 @@ class FiboStrategy(Strategy):
         if party==1: return (0, self.startPos[party] + 2*self.b[step])
         return
 
+class BinomialStrategy(Strategy):
+    startPos=[0,0]
+    nats = None
+    sim  = None
+    lmbd = 0.1
+    dupl = False
+    coef = 1.4773
+    
+    b = [[],[]]
+    def init(self, params=None): 
+        self.gen()
+    
+    def reset(self, nats=[], sim=None, params=[]):
+        self.sim = sim
+        
+        if len(nats)==2: self.nats = nats
+        if self.sim!=None: self.lmbd = sim.lmbd
+        
+        self.gen()
+        pass
+    
+    def genPart(self, party):
+        # lambda on both sides
+        #lmbd = self.sim.lmbd if self.sim!=None else self.lmbd
+        
+        # port scan interval from simulation
+        #t = self.sim.portScanInterval if self.sim != None else 10
+        
+        b    = []             # local array
+        seen = set()          # duplicity check
+        seen_add = seen.add
+        
+        for step in range(0, 3001):
+            x = 2*step
+            if step > 1:
+                x = int(np.random.binomial(3.94 * step, 0.502))  # (1+step*self.coef)
+            if True or self.dupl or (x not in seen and not seen_add(x)): 
+                b.append(x)
+        return b
+                
+    def gen(self):
+        self.b = [self.genPart(0), self.genPart(1)]
+        
+    def silent(self,  time1, time2, lmbd):
+        self.lmbd = lmbd
+        self.startPos=[int(lmbd * time1), int(lmbd * time2)] # expected value        
+        return self.startPos
+    
+    def next(self, party, step):
+        return (0, int(self.startPos[party] + self.b[party][min(step, len(self.b[party])-1)]))
+
+
 class PoissonStrategy(Strategy):
     startPos=[0,0]
     nats = None
@@ -370,8 +422,7 @@ class PoissonStrategy(Strategy):
             # dupl=False, lmbd=0.1, t=10
             #x = int(NatSimulation.poisson(self.lmbd, t * (1+step*1.485)    ))
             
-            x  = round(step * 2.03) 
-            #x = int(NatSimulation.poisson(lmbd, t * (1+step*self.coef)    ))
+            x = int(NatSimulation.poisson(lmbd, t * (1+step*self.coef)    ))
             if self.dupl or (x not in seen and not seen_add(x)): 
                 b.append(x)
         return b
@@ -445,7 +496,7 @@ class NatSimulation:
         '''
         Uses Numpy package to take sample from poisson distribution
         '''
-        return int(np.random.poisson(lmbd*t, 1)[0])
+        return int(np.random.poisson(lmbd*t))
     
     @staticmethod
     def uniform(lmbd, t):
@@ -1023,9 +1074,9 @@ class NatSimulation:
         isteps  = set(isteps)
         maxStep = max(isteps) if len(isteps) > 0 else -1
         
-        iterations = 10000
+        iterations = 5000
         sn = 0
-        ports = 300
+        ports = 3000
         portDistrib = [0] * ports   # initializes to arrays to zeros of length <ports>
         portDistribSteps = {}       # port distributions in particular steps
         
@@ -1093,12 +1144,25 @@ class NatSimulation:
         # Histogram & statistics for whole process
         #self.histAndStatisticsPortDistrib(portDistrib, iterations, ports, 'distrib/total_%s_%03d.pdf' % (lmbdStr, t))
     
+        ns = []
+        ps = []
+    
         # Histogram & statistics for particular interesting ports
         for step in portDistribSteps:
+            print "\n", "="*80
             print "Step %03d" % step
-            self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step))
+            
+            res = self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step))
+            ns.append(res['n'])
+            ps.append(res['p'])
+        
+        # write binomial distributions as pythonic arrays
+        nsString = [('%6.9f' % i) for i in ns]
+        psString = [('%6.9f' % i) for i in ps]
+        print "ns = [", ", ".join(nsString), "]"
+        print "ps = [", ", ".join(psString), "]"
     
-    def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None):
+    def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None, drawHist=False):
         '''
         Compute basic statistics of a given distribution, draws histrogram.
         '''
@@ -1108,38 +1172,44 @@ class NatSimulation:
         #
         (ssum, ex, var, stdev) = self.calcPortDistribInfo(portDistrib, iterations)
         print "E[x] = %04.2f;  V[x] = %04.2f;  stddev = %04.2f;  sum=%05d; Distribution:" % (ex, var, stdev, ssum)
-        print portDistrib
+        #print portDistrib
         
         #
         # Try to approximate with poisson distribution and binomial distribution
         #
-        (chi, pval) = self.goodMatchPoisson(ex, portDistrib, ports, iterations)
+        (chi_p, pval_p) = self.goodMatchPoisson(ex, portDistrib, ports, iterations)
         print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.7f; alpha=0.05; hypothesis %s" % \
-            (ex, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+            (ex, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
             
         (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations)
         print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.7f; alpha=0.05; hypothesis %s" % \
-            (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
-        
+            (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")        
+
         #
         # Draw a histogram
         #
-        pos = np.arange(ports)
-        width = 1.0     # gives histogram aspect to the bar diagram
+        if drawHist:
+            pos = np.arange(ports)
+            width = 1.0     # gives histogram aspect to the bar diagram
+            
+            ax = plt.axes()
+            ax.set_xticks(pos + (width / 2))
+            ax.set_xticklabels(range(0, ports), rotation=90, size='x-small')
+            if histWidth != None:
+                ax.set_ylim([0,histWidth])
+            plt.bar(pos, portDistrib, width, color='r')
+            
+            if fname!= None:
+                plt.savefig(fname)
+                plt.close()
+            else:
+                plt.show()
+                
+        return {'ssum' : ssum, 'ex': ex, 'var': var, 'stdev': stdev, 
+                'chi_p': chi_p, 'pval_p': pval_p, 
+                'chi': chi, 'pval': pval, 'n': tmp_n, 'p': tmp_p
+                }
         
-        ax = plt.axes()
-        ax.set_xticks(pos + (width / 2))
-        ax.set_xticklabels(range(0, ports), rotation=90, size='x-small')
-        if histWidth != None:
-            ax.set_ylim([0,histWidth])
-        plt.bar(pos, portDistrib, width, color='r')
-        
-        if fname!= None:
-            plt.savefig(fname)
-            plt.close()
-        else:
-            plt.show()
-    
     def calcPortDistribInfo(self, portDistrib, iterations):
         '''
         E[X], V[X], stddev, sum
@@ -1203,7 +1273,7 @@ class NatSimulation:
         if idxExGt5 == None or len(idxExGt5)==0:
             return (0.0,0.0)
         
-        idxObsGt5 = [i for i,x in enumerate(observed) if (x>=5 or not matchBoth)]
+        idxObsGt5 = [i for i,x in enumerate(observed) if x>=5] if matchBoth else idxExGt5
         if idxObsGt5 == None or len(idxObsGt5)==0:
             return (0.0,0.0)
         
@@ -1240,7 +1310,7 @@ if __name__ == "__main__":
     parser.add_argument('-o','--output',help='Output file name from finder', required=False, default='graph.txt')
     parser.add_argument('-t','--space',help='Time in ms to wait between packet send', required=False, default=10, type=int)
     parser.add_argument('-l','--lmbd_start',help='On which lambda to start', required=False, default=-1, type=float)
-    parser.add_argument('-s','--strategy',help='Strategy to use (poisson, i2j, fibo, their)', required=False, default='poisson')
+    parser.add_argument('-s','--strategy',help='Strategy to use (poisson, i2j, fibo, their, ij, binom)', required=False, default='poisson')
     args = parser.parse_args()
     
     ns = NatSimulation()
@@ -1276,6 +1346,9 @@ if __name__ == "__main__":
     elif args.strategy == 'poisson':
         print "Poisson strategy"    
         strategy  = PoissonStrategy()
+    elif args.strategy == 'binom':
+        print "Binomial strategy"    
+        strategy  = BinomialStrategy()
     strategy.init(None)
     
     #strategy.dupl = True
@@ -1283,12 +1356,13 @@ if __name__ == "__main__":
     ns.lmbd = 0.1
     ns.simulationRounds = 1000
     ns.errors = 1000
+    ns.portScanInterval = 10
     #ns.simulation(natA, natB, strategy)
     #sys.exit(3)
     
     # Their
     #strategy.delta = [200, 200]
-    ns.portDistributionFunction(0.1, 10, range(1,100), [])
+    ns.portDistributionFunction(0.1, 10, range(1,1000), [])
     sys.exit(3)
     
     # generating graph for moving lambda
