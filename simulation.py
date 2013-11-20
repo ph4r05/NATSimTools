@@ -12,7 +12,10 @@ from operator import itemgetter, attrgetter
 import subprocess
 from optparse import OptionParser
 import copy
+from scipy.stats import binom
+from scipy.stats import norm
 from scipy.stats import poisson
+from scipy.stats import chisquare
 import numpy as np
 import matplotlib.pyplot as plt
 import time
@@ -244,6 +247,31 @@ class TheirStragegy(Strategy):
     def next(self, party, step):
         if party==0: return (step,self.delta[0])
         if party==1: return (step,self.delta[1])
+
+class IJStragegy(Strategy):
+    startPos=[0,0]
+    b = []
+    def init(self, params=None):
+        pass
+    def reset(self, nats=[], sim=None, params=[]):
+        self.b = []
+        c = 0
+        for step in range(0, 1500):
+            self.b.append(c)
+            #c = NatSimulation.poisson(sim.lmbd, 2 * sim.portScanInterval * (step))
+            #c += int(2.0 * sim.lmbd * sim.portScanInterval)
+            c += 2
+            #c += random.randint(0, 2)
+            #print "step=",step, "smpl=", sim.lmbd * 2 * sim.portScanInterval * (step)
+        
+    def silent(self,  time1, time2, lmbd):
+        #self.startPos=[int(lmbd * time1), int(lmbd * time2)]
+        #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
+        return self.startPos
+        
+    def next(self, party, step):
+        if party==0: return (0, int(self.startPos[0]+self.b[step]))
+        if party==1: return (0, int(self.startPos[1]+self.b[step]))
     
 class I2JStragegy(Strategy):
     startPos=[0,0]
@@ -382,7 +410,7 @@ class NatSimulation:
     # @see http://filebox.vt.edu/users/pasupath/papers/poisson_streams.pdf
     # @see http://www.math.wsu.edu/faculty/genz/416/lect/l05-45.pdf
     # @see http://preshing.com/20111007/how-to-generate-random-timings-for-a-poisson-process/
-    lmbd = 0.1
+    lmbd = 0.01
     
     # Number of miliseconds for silent period to take [ms].
     # Based on basic ping / round trip time it takes to communicate 
@@ -982,7 +1010,7 @@ class NatSimulation:
             if t > timeout: lmbdL = cLmbd
         return lmbdL
     
-    def portDistributionFunction(self, lmbd, t, pstep):
+    def portDistributionFunction(self, lmbd, t, isteps=[], exclude=[]):
         '''
         Measures distribution function of the ports on NAT with Poisson process.
         This matters since the whole nature of NAT is incremental. Number of 
@@ -992,39 +1020,216 @@ class NatSimulation:
         
         For instance port 6 can be reached by 2,2,2 or 3,3. 
         '''
-        ports = 1000
-        portDistrib = []
-        for i in range(0, ports): portDistrib.append(0)
-        for sn in range(0, 10000): # self.simulationRounds):
+        isteps  = set(isteps)
+        maxStep = max(isteps) if len(isteps) > 0 else -1
+        
+        iterations = 10000
+        sn = 0
+        ports = 300
+        portDistrib = [0] * ports   # initializes to arrays to zeros of length <ports>
+        portDistribSteps = {}       # port distributions in particular steps
+        
+        # initialize port distributions 
+        for i in isteps: portDistribSteps[i] = [0] * ports 
+        
+        # Simulate the process. Each iteration generates process sample and
+        # adds data to accumulators.
+        while sn < iterations:
             
-            ports = []
+            # Speed optimization - sample poisson distribution
+            poissonSample = np.random.poisson(lmbd*t, max(maxStep+10, ports+10))
+            
+            # 
+            portsArr = {}   # stores step -> port mapping in this simulation run
             step    = 0
             curPort = 0
-            while curPort < ports:
-                if(curPort!=0 and pstep!=-1 and step==pstep):
-                    portDistrib[curPort] += 1        # port is used
+            fail    = False
+            while curPort < ports:             
+                # Select only those runs that does not trigger particular ports.
+                # This fixes probability of occuring such port to 0 and simulating
+                # port distribution function under this condition (conditional probability)
+                if step!=0 and (curPort in exclude): 
+                    fail = True
+                    break
                 
-                curPort += self.poisson(lmbd, t) # add new connections by Poisson process
+                # Step optimization here, if we are interested only in results from
+                # particular step, it is not needed to compute
+                if (maxStep!=-1 and maxStep < (step+1)):
+                    break
+                
+                portsArr[step] = curPort
+                curPort += poissonSample[step]   #self.poisson(lmbd, t) # add new connections by Poisson process
                 curPort += 1                     # add my port, I made it by a new connection
                 step    += 1
+            
+            #
+            # Check if generated run complies our probabilistic distribution
+            # we want to get.
+            #
+            if (sn % 1000) == 0: 
+                sys.stdout.write('%04d;' % sn)  
+                sys.stdout.flush()
+            if fail: 
+                sys.stdout.write('x')
+                continue
+            
+            # Add ports to distribution
+            for step in portsArr:
+                curPort = portsArr[step]
                 
-                ports.append(curPort)
+                # Are we interested in particular port add sample 
+                # to distribution collector.
+                if step in isteps:
+                    portDistribSteps[step][curPort] += 1
+                
+                # Collecting to total distribution
+                if curPort!=0:
+                    portDistrib[curPort] += 1
+            sn += 1 
         pass
-    
-        print "Here comes a histogram..."
-        #hist = np.histogram(portHist, bins=range(0, ports))
+        lmbdStr = ('%01.4f' % lmbd).replace('.', '_')
+        print "Data sampling done..."
         
+        # Histogram & statistics for whole process
+        #self.histAndStatisticsPortDistrib(portDistrib, iterations, ports, 'distrib/total_%s_%03d.pdf' % (lmbdStr, t))
+    
+        # Histogram & statistics for particular interesting ports
+        for step in portDistribSteps:
+            print "Step %03d" % step
+            self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step))
+    
+    def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None):
+        '''
+        Compute basic statistics of a given distribution, draws histrogram.
+        '''
+        
+        #
+        # Compute basic statistics
+        #
+        (ssum, ex, var, stdev) = self.calcPortDistribInfo(portDistrib, iterations)
+        print "E[x] = %04.2f;  V[x] = %04.2f;  stddev = %04.2f;  sum=%05d; Distribution:" % (ex, var, stdev, ssum)
+        print portDistrib
+        
+        #
+        # Try to approximate with poisson distribution and binomial distribution
+        #
+        (chi, pval) = self.goodMatchPoisson(ex, portDistrib, ports, iterations)
+        print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.7f; alpha=0.05; hypothesis %s" % \
+            (ex, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+            
+        (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations)
+        print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.7f; alpha=0.05; hypothesis %s" % \
+            (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+        
+        #
+        # Draw a histogram
+        #
         pos = np.arange(ports)
         width = 1.0     # gives histogram aspect to the bar diagram
         
         ax = plt.axes()
         ax.set_xticks(pos + (width / 2))
-        ax.set_xticklabels(range(0, ports))
-        
+        ax.set_xticklabels(range(0, ports), rotation=90, size='x-small')
+        if histWidth != None:
+            ax.set_ylim([0,histWidth])
         plt.bar(pos, portDistrib, width, color='r')
-        plt.show()
-    
         
+        if fname!= None:
+            plt.savefig(fname)
+            plt.close()
+        else:
+            plt.show()
+    
+    def calcPortDistribInfo(self, portDistrib, iterations):
+        '''
+        E[X], V[X], stddev, sum
+        '''
+        
+        # sum port distrib function
+        ssum = 0
+        for i in portDistrib: ssum+=i 
+        
+        # expected value of distribution
+        ex = 0.0
+        for port, count in enumerate(portDistrib):
+            p   = float(count) / float(iterations)
+            ex += p * float(port)
+            
+        # sample unbiased variance of distribution = 1/(n-1) * Sum((x_i - E[x])^2)
+        var = 0.0
+        cn  = 0
+        for port, count in enumerate(portDistrib):
+            var += count * ((port - ex) * (port - ex))
+            cn  += count
+            
+        var = var / float(cn) if cn>0 else 0
+        stdev = math.sqrt(var)
+        return (ssum, ex, var, stdev)
+    
+    def goodMatchBinomial(self, ex, var, observed, bins, iterations):
+        '''
+        Performs Chi-Squared test that given data comes from binomial distribution.
+        Number of bins to sample from poisson=0..bins
+        '''
+        # X ~ Binom(n, p)
+        # E[x] = np
+        # V[x] = np(1-p)
+        # if we know E[X], V[X] then V[X] = E[X] * (1-p) => p = (E[x] - V[X]) / E[x]
+        if ex == 0: return (0.0, 0.0, 0.0, 0.0)
+        p = (ex-var) / float(ex)
+        n = ex / p
+        
+        # expected values - compute N * probability for each port assumed in range 0..bins
+        expected = [(iterations * binom.pmf(i, n, p)) for i in range(0, bins)]
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations)
+        return (chi, pval, n, p)
+    
+    def goodMatchPoisson(self, lmbd, observed, bins, iterations):
+        '''
+        Performs Chi-Squared test that given data comes from Poisson distribution with given lambda
+        Number of bins to sample from poisson=0..bins
+        '''        
+        # expected values - compute N * probability for each port assumed in range 0..bins
+        expected = [(iterations * poisson.pmf(i, lmbd)) for i in range(0, bins)]
+        return self.goodMatchDistribution(observed, expected, bins, iterations)
+    
+    def goodMatchDistribution(self, observed, expected, bins, iterations, matchBoth=True, verbose=False):
+        '''
+        Performs Chi-Squared test that given data comes from a given distribution.
+        Number of bins to sample from distribution=0..bins
+        '''        
+        # select only those values which N*np >= 5
+        idxExGt5 = [i for i,x in enumerate(expected) if x>=5]
+        if idxExGt5 == None or len(idxExGt5)==0:
+            return (0.0,0.0)
+        
+        idxObsGt5 = [i for i,x in enumerate(observed) if (x>=5 or not matchBoth)]
+        if idxObsGt5 == None or len(idxObsGt5)==0:
+            return (0.0,0.0)
+        
+        # intersection on ports
+        bothGt5 = list(set(idxExGt5) & set(idxObsGt5))
+        bothGt5.sort()
+        if bothGt5 == None or len(bothGt5)<5:
+            print "Warning! too many matching indices: %d" % len(bothGt5)
+            return (0.0,0.0)
+        
+        # expected values having counts higher-and-equal than 5
+        expTest  = [expected[i] for i in bothGt5]
+        
+        # new observed array - select only those ports from passed array that are in idxExGt5
+        obsTest  = [observed[i] for i in bothGt5]
+        
+        if verbose:
+            print "matching both:\n", bothGt5
+            print "expected: \n", expTest
+            print "observed: \n", obsTest
+        
+        # perform chi-squared test on distribution
+        return chisquare(np.array(obsTest), f_exp=np.array(expTest))
+    
+    # Here ends the class
+    pass
     
 # main executable code    
 
@@ -1059,6 +1264,9 @@ if __name__ == "__main__":
     if args.strategy == 'i2j':
         print "I2J Strategy: "
         strategy = I2JStragegy()
+    elif args.strategy == 'ij':
+        print "IJ strategy"
+        strategy = IJStragegy()
     elif args.strategy == 'fibo':
         print "Fibonacci strategy"
         strategy = FiboStrategy()
@@ -1070,15 +1278,17 @@ if __name__ == "__main__":
         strategy  = PoissonStrategy()
     strategy.init(None)
     
-    # Their
-    #strategy.delta = [200, 200]
-
-    ns.portDistributionFunction(0.2, 10, 60)
-    sys.exit(3)
-    
     #strategy.dupl = True
     #strategy.coef = 1.8
-    ns.simulation(natA, natB, strategy)
+    ns.lmbd = 0.1
+    ns.simulationRounds = 1000
+    ns.errors = 1000
+    #ns.simulation(natA, natB, strategy)
+    #sys.exit(3)
+    
+    # Their
+    #strategy.delta = [200, 200]
+    ns.portDistributionFunction(0.1, 10, range(1,100), [])
     sys.exit(3)
     
     # generating graph for moving lambda
