@@ -1210,6 +1210,12 @@ class NatSimulation:
                 # How to set p.m.f. for some element x to 0: re-normalize p.m.f. to 1 again,
                 # multiply each element by 1/(1-p) where p is probability for element x.
                 #
+                # How it is done here: lets assume 1 step, left out y=2.
+                # Then p(1)_real = p(1) * sum_{step=0}^{\infty} P(y)^{step} = p(1) * (1 + p(y) + p(y)^2 + ...)
+                # Sum of a geometrical sequence gives us: sum_{step=0}^{\infty} P(y)^{step} = 1 / (1-p(y))
+                #
+                # Thus generating a) by scaling and b) by omitting and re0generating is equivalent!   
+                #
                 if step!=0 and (curPort in exclude) and maxStep >= step: 
                     fail = True
                     break
