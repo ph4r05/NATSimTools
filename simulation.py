@@ -20,6 +20,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 import argparse
+from dateutil import parser as dparser
+import calendar
+import bisect
+import heapq
+from heapq import heappush, heappop
 
 # Fibonacchi list generator
 def fibGenerator():
@@ -49,6 +54,12 @@ def probRound(x):
         return int(cel)
     else:
         return int(flr) 
+
+def hashcode(s):
+    h = 0
+    for c in s:
+        h = (31 * h + ord(c)) & 0xFFFFFFFF
+    return ((h + 0x80000000) & 0xFFFFFFFF) - 0x80000000
 
 class Strategy:
     '''
@@ -82,11 +93,13 @@ class Nat:
         raise Exception("Not implemented yet...") 
     def reset(self):
         raise Exception("Not implemented yet...")
-    def alloc(self, srcIP, srcPort, dstIP, dstPort, timeNow):
-        raise Exception("Not implemented yet...") 
+    def alloc(self, srcIP, srcPort, dstIP, dstPort, timeNow, timeAdd=None, refreshOnly=False):
+        raise Exception("Not implemented yet...")
     def occupy(self, num, timeNow):
         raise Exception("Not implemented yet...")
     def freePorts(self):
+        raise Exception("Not implemented yet...")
+    def peekNext(self):
         raise Exception("Not implemented yet...")
 
 class Quartet:
@@ -104,7 +117,8 @@ class Quartet:
         self.dstIP = dstIP
         self.dstPort = dstPort
     def __cmp__(self, other):
-        if self.srcIP == other.srcIP          \
+        if  other!=None \
+            and self.srcIP == other.srcIP         \
             and self.srcPort == other.srcPort \
             and self.dstIP == other.dstIP     \
             and self.dstPort == other.dstPort: return 0
@@ -118,10 +132,10 @@ class Quartet:
     def __hash__(self):
         prime=31
         result=1
-        result = prime * result + self.srcIP
-        result = prime * result + self.srcPort
-        result = prime * result + self.dstIP
-        result = prime * result + self.dstPort
+        result = prime * result + hashcode(self.srcIP)
+        result = prime * result + int(self.srcPort)
+        result = prime * result + hashcode(self.dstIP)
+        result = prime * result + int(self.dstPort)
         return result
     
 class SymmetricNat(Nat):
@@ -132,6 +146,8 @@ class SymmetricNat(Nat):
     allocations = None 
     # port -> (quartet, expire time). Quartet may be null
     allocatedPorts = None
+    # priority queue (heap), priority=expire time, tuple stored=(expire time, port, quartet)
+    expireHeap = None
     
     # port is the key
     # port -> quartet, expire
@@ -142,26 +158,40 @@ class SymmetricNat(Nat):
         self.pool = range(0, 65536)
         self.poolLen = len(self.pool)
         self.allocatedPorts = {}
+        self.expireHeap = []
         
     def reset(self):
         self.allocations = {}
         self.allocatedPorts = {}
+        self.expireHeap = []
     
     def nextPort(self):
         '''
         Uses port pool array and pointer to last allocated port to obtain next in the sequence.
-        In case of random allocation randomly generates index to a pool and returns a port on the index.
+        In case of a random allocation, randomly generates index to a pool and returns a port on the index.
         '''
-        raise Exception("Not implemented yet... This class is abstract, you have to override this method in subclass")
+        raise Exception("Not implemented yet... This class is abstract, you have to override this method in a subclass")
     
-    def nextFreePort(self, timeNow):
+    def peekPort(self, prev=None):
+        raise Exception("Not implemented yet... This class is abstract, you have to override this method in a subclass")
+    
+    def peekNext(self, timeNow):
+        return self.nextFreePort(timeNow, True)
+    
+    def nextFreePort(self, timeNow, peek=False):
         '''
-        Returns next free port in the sequence, takes existing associations into account and their expiration
+        Returns next free port in the sequence, takes existing associations into account and their expiration.
+        Can be used to determine internal state of NAT, call does not affect internal state - reentrant function call.
+        
+        Runs in O(portNum) in worst case but in average it runs fast since to take it longer
+        there would have to be a long block of allocated non-expired connections - this is implemented 
+        as it would be in routers with incremental/random allocation without more complex state structures. 
         '''
         tries=0                                                # pool exhaustion check
         port=-1
+        prev=None
         while tries <= self.poolLen:
-            port   = self.nextPort()                           # linear port allocation rule here
+            port,prev = self.peekPort(prev) # nextPort()              # linear port allocation rule here
             tries += 1                                         # check pool exhaustion
             if port in self.allocatedPorts:
                 # next port is already allocated, what about timeout?
@@ -174,36 +204,50 @@ class SymmetricNat(Nat):
                     break                                      # slot is free now, can allocate
                 else: continue                       # slot is in use, continue with search
             else: break                              # slot is free, assign
+            
         # check if pool is exhausted - all ports are allocated currently
         if tries >= self.poolLen or port==-1:
             raise Exception("Port pool exhausted")
+        # reflect to internal NAT state - move iterator
+        if peek==False:
+            for i in range(0,tries): self.nextPort()
         # return resulting port, should not be -1
         return port
     
-    def alloc(self, srcIP, srcPort, dstIP, dstPort, timeNow):
+    def alloc(self, srcIP, srcPort, dstIP, dstPort, timeNow, timeAdd=None, refreshOnly=False):
         '''
         Basic allocation method for new connection
         '''
         q = Quartet(srcIP, srcPort, dstIP, dstPort)
+        if timeAdd == None: timeAdd = timeNow
         
         # Check for existing allocation for a given quartet
         if q in self.allocations:
             port = self.allocations.get(q)
-            # check expiration time, if a record is too old, it has to be removed from alloc table.
+            # check expiration time, if a record is too old, it has to be removed from allocation table.
             tup = self.allocatedPorts.get(port)
             if (tup[1] + self.timeout) < timeNow:
                 del self.allocatedPorts[port]     # delete from allocation set
                 del self.allocations[q]           # expired -> delete from allocation table
             else:
-                self.allocatedPorts[port] = (q, timeNow)    # update last query access
+                self.allocatedPorts[port] = (q, timeAdd)    # update last query access
                 return port                                 # external port returned
         
-        # if here -> not in allocation list, create a new allocation
-        port=self.nextFreePort(timeNow)
-        # create a new allocation
-        self.allocatedPorts[port] = (q, timeNow)
-        self.allocations[q] = port
+        # If here -> not in allocation list, create a new allocation
+        # New allocation is created only if desired
+        if refreshOnly: return -1               
         
+        # Get next free port from port pool that is free for use
+        # time parameter passed will expire all existing connections
+        port=self.nextFreePort(timeNow)
+        # Create a new allocation
+        self.allocatedPorts[port] = (q, timeAdd)
+        self.allocations[q] = port
+        # Add to heap
+        heappush(self.expireHeap, (timeAdd, port, q))
+        # Timeout all entries - internal table cleaning with probability 1:100
+        if random.randint(0, 100) == 0:
+            self.cleanHeap(timeNow)
         return port
     
     def occupy(self, num, timeNow):
@@ -213,21 +257,36 @@ class SymmetricNat(Nat):
         for i in range(0, num):
             port = self.nextFreePort(timeNow)
             self.allocatedPorts[port] = (None, timeNow)
+            heappush(self.expireHeap, (timeNow, port, None))   # Add to heap
         return 1
     
     def freePorts(self):
         return (self.poolLen - len(self.allocatedPorts))
     
+    def cleanHeap(self, timeNow):
+        '''
+        Performs timeouting for all expired records - based on priority queue on access time
+        '''
+        while(len(self.expireHeap) > 0):
+            cur, port, q = self.expireHeap[0]
+            if (cur + self.timeout) >= timeNow: break   # if minimal is not expired -> return
+            
+            # Expired - does it exist in real allocation table?
+            if port in self.allocatedPorts \
+                and cur == self.allocatedPorts[port][1] \
+                and q   == self.allocatedPorts[port][0]:
+                
+                # Record exists and is expired, thus clean it
+                if (q != None):
+                    del self.allocations[q]             # expired -> delete from allocation table
+                del self.allocatedPorts[port]           # delete from allocation set
+            # Remove element from queue
+            heappop(self.expireHeap)
+            #sys.stdout.write("X")
+        #sys.stdout.flush()
+    
     def trulyFreePorts(self, timeNow):
-        cp = copy.deepcopy(self.allocatedPorts)
-        for port in cp:
-            # next port is already allocated, what about timeout?
-            tup = self.allocatedPorts[port]
-            # check expiration first
-            if (tup[1] + self.timeout) < timeNow:
-                if (tup[0] != None):
-                        del self.allocations[tup[0]]       # expired -> delete from allocation table
-                del self.allocatedPorts[port]              # delete from allocation set
+        self.cleanHeap(timeNow)
         return self.freePorts()
 
 class SymmetricRandomNat(SymmetricNat):
@@ -239,6 +298,9 @@ class SymmetricRandomNat(SymmetricNat):
         Randomly generates index to a pool and returns a port on the index.
         '''
         return self.pool[random.randint(0, self.poolLen-1)]
+    
+    def peekPort(self, prev=None):
+        return (self.nextPort(), None)
     
 class SymmetricIncrementalNat(SymmetricNat):
     # index of last allocated port. Index to pool[]
@@ -252,9 +314,18 @@ class SymmetricIncrementalNat(SymmetricNat):
     def nextPort(self):
         '''
         Uses port pool array and pointer to last allocated port to obtain next in the sequence.
+        Modifies internal state. Acts like next() in iterators.
         ''' 
         self.lastPort = (self.lastPort + 1) % self.poolLen # linear port allocation rule here
-        return self.pool[self.lastPort]                  # just a shortcut
+        return self.pool[self.lastPort]                    # just a shortcut
+    
+    def peekPort(self, prev=None):
+        '''
+        Determines next free port without moving anything
+        '''
+        if prev==None: prev = self.lastPort
+        tmp = (prev + 1) % self.poolLen # linear port allocation rule here
+        return (self.pool[tmp], tmp)           # just a shortcut
 
 class TheirStragegy(Strategy):
     '''
@@ -552,6 +623,9 @@ class NatSimulation:
     dot=1
     ascii=1
     
+    # process in generator
+    proc=None
+    
     @staticmethod
     def poisson(lmbd, t):
         '''
@@ -739,6 +813,247 @@ class NatSimulation:
                 print "dafuq?"
                 return cc   
         return cc
+    
+    @staticmethod
+    def dtimeToUtc(dtime):
+        '''
+        Converts datetime to unix time stamp
+        '''
+        return int((calendar.timegm(dtime.utctimetuple()) * 1000) + (dtime.microsecond/1000))
+    
+    @staticmethod
+    def nfline2tuple(line):
+        '''
+        Translates nfdump line of a format "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" to a tuple defined by the format
+        '''
+        tpl = [str(x).strip() for x in line.split(";")]
+        tstart = tpl[0]
+        tdur   = float(tpl[1])
+        
+        dtime = dparser.parse(tstart)           # Parse time from nfdump to datetime format
+        startUtc = NatSimulation.dtimeToUtc(dtime)            # convert date time string to UTC
+        lastData = int(startUtc + round(tdur)) 
+        tpl.append(startUtc)
+        tpl.append(lastData)
+        
+        return (tpl, startUtc) 
+    
+    def nfdumpSortedGenerator(self, filename, filt=None, activeTimeout=300*1000):
+        '''
+        Generator object producing nfdump lines for a given filename. Records are sorted by first seen time.
+        Using heap and internal logic to sort. 
+        '''    
+        cnt = 0
+        cmdLine = 'nfdump -q -r "%s" -o "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" "%s"' % (filename, filt if filt!=None else "")
+        print "nfdump command line used: %s" % cmdLine
+        
+        self.proc = subprocess.Popen(cmdLine, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+        print "Data loaded, going to process output..."
+        
+        isDead = False       # is producing program dead?
+        buff   = []
+        while(True):         # while there is something to run
+            cnt += 1
+            retcode = self.proc.poll() #returns None while subprocess is running
+            line = self.proc.stdout.readline()
+            
+            # Flag determines whether queue sort is consistent with absolute sort w.r.t. whole data set.  
+            isSorted = False
+            # Flag determines whether there was some line added to the queue => new event read.
+            lineAdded = False
+            
+            # Parse output format to variables.
+            # Partial sort by heap.
+            if line!=None and len(line)>0 and isDead==False:
+                tpl, startUtc = self.nfline2tuple(line)
+                
+                # Add record to the priority queue by time
+                heappush(buff, (startUtc, tpl))
+                lineAdded = True
+                
+                # If time difference between current element and minimal one in queue is 
+                # greater than active timeout, we have probably enough data in queue
+                # to be completely sorted w.r.t. whole data set since the biggest gap 
+                # in nearly-sorted block is of size active timeout (probe added flow to file
+                # when active timeout was expired). The next entry cannot be smaller. 
+                if (startUtc - buff[0][0]) > activeTimeout and len(buff) >= 10000:
+                    isSorted=True 
+                    #print "Sorted event... cnt=%d, min=%s, curr=%s, diff=%s" % (cnt, buff[0][0], startUtc, (startUtc - buff[0][0]))
+
+            # If program is dead skip the line parsing in the next iteration and set data 
+            # in the priority queue as prepared to be processed.
+            if retcode is not None: 
+                isDead=True
+                isSorted=True
+
+            # If line was added and queue is not ready, then continue (still can read some data,
+            # program is still running, so wait to fill queue)
+            if lineAdded and not isSorted and retcode is None: 
+                if (cnt % 1000) == 0: 
+                    sys.stdout.write('.')
+                    sys.stdout.flush()
+                continue
+            
+            # If there is nothing to process then we are done...
+            if len(buff)==0:
+                break
+            
+            tplpopped = heappop(buff)
+            yield tplpopped
+        try:
+            self.proc.kill()
+            self.proc = None
+        except Exception,e:
+            pass
+        pass
+    
+    def nfdumpSimulation(self, filename, natA, homeNet='', filt=None):
+        '''
+        Reads nfdump file with given filter and simulates NAT
+        '''
+        
+        #
+        # Run NFdump and read line by line
+        #
+        cnt = 0
+        activeTimeout = 300*1000 # active timeout = time after a long lived flow is ended and written to a netflow file
+        cmdLine = 'nfdump -q -r "%s" -o "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" "%s"' % (filename, filt if filt!=None else "")
+        print "Starting NAT simulation from netflow file, command line used: %s" % cmdLine
+        
+        p = subprocess.Popen(cmdLine, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+        print "Data loaded, going to process output..."
+        
+        isDead = False
+        buff = []
+        lastSampleTime = 0
+        lastSamplePort = 0
+        lastStart = -1
+        lastFree = natA.poolLen
+        samplesRes = []
+        sampleSize = 1000
+        
+        nfdumpGenerator = self.nfdumpSortedGenerator(filename, filt, activeTimeout)
+        #for tplpopped in 
+        
+        while(True):         # while there is something to run
+            cnt += 1
+            retcode = p.poll() #returns None while subprocess is running
+            line = p.stdout.readline()
+            
+            # Flag determines whether queue sort is consistent with absolute sort w.r.t. whole data set.  
+            isSorted = False
+            # Flag determines whether there was some line added to the queue => new event read.
+            lineAdded = False
+            
+            # Parse output format to variables.
+            # Partial sort by heap.
+            if line!=None and len(line)>0 and isDead==False:
+                tpl, startUtc = self.nfline2tuple(line)
+                
+                # Add record to the priority queue by time
+                heappush(buff, (startUtc, tpl))
+                lineAdded = True
+                
+                # If time difference between current element and minimal one in queue is 
+                # greater than active timeout, we have probably enough data in queue
+                # to be completely sorted w.r.t. whole data set since the biggest gap 
+                # in nearly-sorted block is of size active timeout (probe added flow to file
+                # when active timeout was expired). The next entry cannot be smaller. 
+                if (startUtc - buff[0][0]) > activeTimeout:
+                    isSorted=True 
+                    #print "Sorted event... cnt=%d, min=%s, curr=%s, diff=%s" % (cnt, buff[0][0], startUtc, (startUtc - buff[0][0]))
+
+            # If program is dead skip the line parsing in the next iteration and set data 
+            # in the priority queue as prepared to be processed.
+            if retcode is not None: 
+                isDead=True
+                isSorted=True
+
+            # If line was added and queue is not ready, then continue (still can read some data,
+            # program is still running, so wait to fill queue)
+            if lineAdded and not isSorted and retcode is None: 
+                if (cnt % 1000) == 0: 
+                    sys.stdout.write('.')
+                    sys.stdout.flush()
+                continue
+            
+            # If there is nothing to process then we are done...
+            if len(buff)==0:
+                break
+            
+            tplpopped = heappop(buff)
+            if tplpopped == None or tplpopped[1] == None \
+                or tplpopped[1][0] == None \
+                or tplpopped[1][1] == None \
+                or tplpopped[1][2] == None \
+                or tplpopped[1][3] == None \
+                or tplpopped[1][4] == None \
+                or tplpopped[1][5] == None \
+                or tplpopped[1][6] == None \
+                or tplpopped[1][7] == None \
+                or tplpopped[1][8] == None:
+                continue
+            
+            tstart,tdur,proto,srcIP,srcPort,dstIP,dstPort,startUtc,lastData = tplpopped[1]
+            fromHome = srcIP.startswith(homeNet)    # Is connection made from our network?
+            
+            #print tplpopped[1], fromHome
+            # sample NAT state each X time units
+            if (startUtc/(self.portScanInterval) > lastSampleTime):
+                # Get next port that would be allocated in this time
+                lastPort = natA.peekNext(startUtc)
+                # How many connections were made since last sample?
+                curSampleConn = lastPort - lastSamplePort if lastSamplePort <= lastPort else ((natA.poolLen-lastSamplePort) + lastPort)
+                # Initialize observation start if not start
+                if lastStart==-1: lastStart  = 0
+                else:             
+                    newTimeBlocks = startUtc/(self.portScanInterval) - lastSampleTime
+                    if newTimeBlocks>1: # has to fill gaps where no event happened -> 0
+                        for tmpi in range(lastStart,lastStart+newTimeBlocks-1):
+                            samplesRes.append(0+1)
+                            #print "Sample: time=%s; utc=%s; new connections=%d, lastPortSampled=%d, curPortSampled=%d GAP" % (tmpi*self.portScanInterval, startUtc, 0, lastSamplePort, lastPort)
+                    
+                    lastStart += newTimeBlocks
+                #print "Sample: time=%s; utc=%s; new connections=%d, lastPortSampled=%d, curPortSampled=%d" % (lastStart*self.portScanInterval, startUtc, curSampleConn, lastSamplePort, lastPort)
+                sys.stdout.write('x')
+                sys.stdout.flush()
+                samplesRes.append(curSampleConn+1)
+                
+                lastSamplePort = lastPort
+                lastSampleTime = startUtc/(self.portScanInterval)
+                if len(samplesRes) >= sampleSize: break
+            pass
+            
+            # Allocate to NAT
+            extPort = -1
+            if fromHome:
+                extPort = natA.alloc(srcIP, srcPort, dstIP, dstPort, startUtc, lastData, False)
+            else:   # refresh existing connection only - packet from the outside
+                extPort = natA.alloc(dstIP, dstPort, srcIP, srcPort, startUtc, lastData, True)
+            
+            if False and (cnt%1000)==0:
+                nowFreePorts = natA.trulyFreePorts(startUtc)
+                newConn      = lastFree - nowFreePorts
+                lastFree     = nowFreePorts
+                print "Hah, extPort=%s, free=%s, newCon=%s, time=%s, srchome=%s\n" % (extPort, nowFreePorts, newConn, startUtc, fromHome)
+        
+        minE = min(samplesRes)
+        maxE = max(samplesRes)+1
+        print "Sampling done..."
+        distrib = [0] * (maxE)
+        sampleSize=len(samplesRes)
+        for i in samplesRes: 
+            distrib[i]+=1
+        print "Distribution: ", distrib 
+        
+        self.histAndStatisticsPortDistrib(distrib, sampleSize, maxE, ['nfdump.pdf', 'nfdump.png', 'nfdump.svg'], drawHist=True)
+        
+        for i in range(0,500):
+            lmbd = 0.0 + float(i)*0.1
+            (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSize, False)
+            print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
+                (lmbd, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
+            
     
     def simulation(self, natA, natB, strategy):
         '''
@@ -1214,7 +1529,8 @@ class NatSimulation:
                 # Then p(1)_real = p(1) * sum_{step=0}^{\infty} P(y)^{step} = p(1) * (1 + p(y) + p(y)^2 + ...)
                 # Sum of a geometrical sequence gives us: sum_{step=0}^{\infty} P(y)^{step} = 1 / (1-p(y))
                 #
-                # Thus generating a) by scaling and b) by omitting and re0generating is equivalent!   
+                # Thus generating a) by scaling and b) by omitting and re-generating is equivalent, at least
+                # for the first step.   
                 #
                 if step!=0 and (curPort in exclude) and maxStep >= step: 
                     fail = True
@@ -1291,16 +1607,17 @@ class NatSimulation:
         (ssum, ex, var, stdev) = self.calcPortDistribInfo(portDistrib, iterations)
         print "E[x] = %04.2f;  V[x] = %04.2f;  stddev = %04.2f;  sum=%05d; Distribution:" % (ex, var, stdev, ssum)
         print "dist=[",(" ".join([ '%04d=%01.5f, %s' % (i, i/float(iterations), "\n" if (p % 40) == 39 else '') for p, i in enumerate(portDistrib)])),"]"
+        print "totalp=", sum([i/float(iterations) for i in portDistrib])
         
         #
         # Try to approximate with poisson distribution and binomial distribution
         #
         (chi_p, pval_p) = self.goodMatchPoisson(ex, portDistrib, ports, iterations)
-        print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.7f; alpha=0.05; hypothesis %s" % \
+        print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
             (ex, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
             
         (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations)
-        print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.7f; alpha=0.05; hypothesis %s" % \
+        print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
             (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")        
 
         #
@@ -1318,7 +1635,14 @@ class NatSimulation:
             plt.bar(pos, portDistrib, width, color='r')
             
             if fname!= None:
-                plt.savefig(fname)
+                if isinstance(fname, list):
+                    for fname_i in fname:
+                        try:
+                            plt.savefig(fname_i)
+                        except Exception,e:
+                            print "Error, cannot save to file %s Exception: " % fname_i, e
+                else:
+                    plt.savefig(fname)
                 plt.close()
             else:
                 plt.show()
@@ -1339,10 +1663,10 @@ class NatSimulation:
         
         # expected value of distribution
         ex = 0.0
-        for port, count in enumerate(portDistrib):
+        for port, count in enumerate(portDistrib): 
             p   = float(count) / float(iterations)
             ex += p * float(port)
-            
+        
         # sample unbiased variance of distribution = 1/(n-1) * Sum((x_i - E[x])^2)
         var = 0.0
         cn  = 0
@@ -1354,7 +1678,7 @@ class NatSimulation:
         stdev = math.sqrt(var)
         return (ssum, ex, var, stdev)
     
-    def goodMatchBinomial(self, ex, var, observed, bins, iterations):
+    def goodMatchBinomial(self, ex, var, observed, bins, iterations, matchBoth=True, verbose=False):
         '''
         Performs Chi-Squared test that given data comes from binomial distribution.
         Number of bins to sample from poisson=0..bins
@@ -1369,17 +1693,17 @@ class NatSimulation:
         
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * binom.pmf(i, n, p)) for i in range(0, bins)]
-        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations)
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose)
         return (chi, pval, n, p)
     
-    def goodMatchPoisson(self, lmbd, observed, bins, iterations):
+    def goodMatchPoisson(self, lmbd, observed, bins, iterations, matchBoth=True, verbose=False):
         '''
         Performs Chi-Squared test that given data comes from Poisson distribution with given lambda
         Number of bins to sample from poisson=0..bins
         '''        
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * poisson.pmf(i, lmbd)) for i in range(0, bins)]
-        return self.goodMatchDistribution(observed, expected, bins, iterations)
+        return self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose)
     
     def goodMatchDistribution(self, observed, expected, bins, iterations, matchBoth=True, verbose=False):
         '''
@@ -1433,6 +1757,9 @@ if __name__ == "__main__":
     parser.add_argument('-e','--errors',help='Maximum steps by algorithm', required=False, type=int, default=1000)
     parser.add_argument('-d','--dot',help='Graphviz dot illustration', required=False, type=int, default=0)
     parser.add_argument('-a','--ascii',help='Ascii illustration', required=False, type=int, default=0)
+    parser.add_argument('-n','--nfdump',help='NFdump file', required=False, default=None)
+    parser.add_argument('-f','--filter',help='NFdump filter', required=False, default=None)
+    parser.add_argument('-g','--hostnet',help='NFdump host address', required=False, default="0.0.0.0")
     args = parser.parse_args()
     
     ns = NatSimulation()
@@ -1486,6 +1813,12 @@ if __name__ == "__main__":
     ns.portScanInterval = args.space
     ns.silentPeriodBase=0
     ns.silentPeriodlmbd=0
+    
+    # NFdump simulation from dump file
+    if args.nfdump != None:
+        ns.nfdumpSimulation(args.nfdump, natA, args.hostnet, args.filter)
+        sys.exit(0)
+    
     #ns.simulation(natA, natB, strategy)
     #sys.exit(3)
     
