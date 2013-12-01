@@ -1034,7 +1034,7 @@ class NatSimulation:
         (ssum, ex, var, stdev) = self.calcPortDistribInfo(distrib, sampleSize)
         self.histAndStatisticsPortDistrib(distrib, sampleSize, maxE, ['nfdump.pdf', 'nfdump.png', 'nfdump.svg'], drawHist=True)
         
-        chis = []
+        chis = [9999999]
         for i in range(0,200):
             lmbd = max(ex-10.0,0) + float(i)*0.1
             (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSize, True, wiseBinning=True)
@@ -1044,14 +1044,14 @@ class NatSimulation:
                 (lmbd, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
         print "Minimal Chi: ", min(chis)
         
-        #chis = []
-        #for i in range(0,500):
-        #    lmbd = 0.0 + float(i)*0.1
-        #    (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSize, False)
-        #    if chi>0: chis.append(chi)
-        #    print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
-        #        (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
-        #print "Minimal Chi: ", min(chis) 
+        chis = [9999999]
+        for i in range(0,0):
+            lmbd = max(ex-10.0,0) + float(i)*0.1
+            (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSize, False, wiseBinning=True)
+            if chi>0: chis.append(chi)
+            print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
+                (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+        print "Minimal Chi: ", min(chis) 
             
     
     def simulation(self, natA, natB, strategy):
@@ -1615,7 +1615,7 @@ class NatSimulation:
         print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
             (ex, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
             
-        (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations)
+        (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
         print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
             (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")        
 
@@ -1677,7 +1677,7 @@ class NatSimulation:
         stdev = math.sqrt(var)
         return (ssum, ex, var, stdev)
     
-    def goodMatchBinomial(self, ex, var, observed, bins, iterations, matchBoth=True, verbose=False):
+    def goodMatchBinomial(self, ex, var, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
         '''
         Performs Chi-Squared test that given data comes from binomial distribution.
         Number of bins to sample from poisson=0..bins
@@ -1700,7 +1700,7 @@ class NatSimulation:
             p = 1/p
             n = ex/p
         
-        return self.goodMatchBinomialNP(n, p, observed, bins, iterations, matchBoth, verbose)
+        return self.goodMatchBinomialNP(n, p, observed, bins, iterations, matchBoth, verbose, wiseBinning)
     
     def goodMatchBinomialNP(self, n, p, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
         '''
@@ -1750,7 +1750,7 @@ class NatSimulation:
         obsTest  = [observed[i] for i in bothGt5]
         
         if wiseBinning:
-            expTest, obsTest = self.unimodalWiseBinning(observed, expected)
+            obsTest, expTest = self.unimodalWiseBinning(observed, expected)
         
         if verbose:
             print "matching both:\n", bothGt5
@@ -1759,9 +1759,6 @@ class NatSimulation:
         
         # perform chi-squared test on distribution
         return chisquare(np.array(obsTest), f_exp=np.array(expTest))
-    
-    # Here ends the class
-    pass
 
     def unimodalWiseBinning(self, observed, expected):
         '''
@@ -1792,22 +1789,23 @@ class NatSimulation:
         if end==-1: end=len(observed)-1
         
         # 3. generate categories, handle boundary categories that are sums
-        expTest, obsTest = [], []
+        obsTest, expTest = [], []
         # Left border category
-        expTest.append(sum([j for i,j in enumerate(observed) if i<=beg]))
-        obsTest.append(sum([j for i,j in enumerate(expected) if i<=beg]))
+        expTest.append(sum([j for i,j in enumerate(expected) if i<=beg]))
+        obsTest.append(sum([j for i,j in enumerate(observed) if i<=beg]))
         # Inside
-        expTest.extend([j for i,j in enumerate(observed) if i>beg and i<end])
-        obsTest.extend([j for i,j in enumerate(expected) if i>beg and i<end])
+        expTest.extend([j for i,j in enumerate(expected ) if i>beg and i<end])
+        obsTest.extend([j for i,j in enumerate(observed) if i>beg and i<end])
         # Right border category
-        expTest.append(sum([j for i,j in enumerate(observed) if i>=end]))
-        obsTest.append(sum([j for i,j in enumerate(expected) if i>=end]))
+        expTest.append(sum([j for i,j in enumerate(expected) if i>=end]))
+        obsTest.append(sum([j for i,j in enumerate(observed) if i>=end]))
         
-        return (expTest, obsTest)
+        return (obsTest, expTest)
     
 # main executable code    
 
-
+    # Here ends the class
+    pass
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='NAT simulator.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
