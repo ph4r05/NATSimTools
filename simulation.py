@@ -943,7 +943,7 @@ class NatSimulation:
         lastStart = -1
         lastFree = natA.poolLen
         samplesRes = []
-        sampleSize = 10000
+        sampleSize = 1000
         
         # Prepare nfdump record generator.
         nfdumpGenerator = None
@@ -1671,8 +1671,14 @@ class NatSimulation:
         # V[x] = np(1-p)
         # if we know E[X], V[X] then V[X] = E[X] * (1-p) => p = (E[x] - V[X]) / E[x]
         if ex == 0: return (0.0, 0.0, 0.0, 0.0)
-        p = (ex-var) / float(ex)
-        n = ex / p
+        ex  = float(ex)
+        var = float(var)
+        
+        #p = (ex-var) / ex
+        #n = ex / p
+        
+        n = ex*ex / (var-ex)
+        p = ex/n
         
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * binom.pmf(i, n, p)) for i in range(0, bins)]
