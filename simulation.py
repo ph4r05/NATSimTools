@@ -997,8 +997,10 @@ class NatSimulation:
             extPort = -1
             if fromHome:
                 extPort = natA.alloc(srcIP, srcPort, dstIP, dstPort, startUtc, lastData, False)
+                pass
             else:   # refresh existing connection only - packet from the outside
                 extPort = natA.alloc(dstIP, dstPort, srcIP, srcPort, startUtc, lastData, True)
+                pass
             
             if False and (cnt%1000)==0:
                 nowFreePorts = natA.trulyFreePorts(startUtc)
@@ -1029,13 +1031,27 @@ class NatSimulation:
             distrib[i]+=1
         print "Distribution: ", distrib 
         
+        (ssum, ex, var, stdev) = self.calcPortDistribInfo(distrib, sampleSize)
         self.histAndStatisticsPortDistrib(distrib, sampleSize, maxE, ['nfdump.pdf', 'nfdump.png', 'nfdump.svg'], drawHist=True)
         
-        for i in range(0,500):
-            lmbd = 0.0 + float(i)*0.1
-            (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSize, False)
+        chis = []
+        for i in range(0,200):
+            lmbd = max(ex-10.0,0) + float(i)*0.1
+            (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSize, True, wiseBinning=True)
+            if chi_p==0 or chi_p>1000.0: continue
+            if chi_p > 0: chis.append(chi_p)
             print "Chi-Squared test on match with Po(%04.4f): Chi: %06.3f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
                 (lmbd, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
+        print "Minimal Chi: ", min(chis)
+        
+        #chis = []
+        #for i in range(0,500):
+        #    lmbd = 0.0 + float(i)*0.1
+        #    (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSize, False)
+        #    if chi>0: chis.append(chi)
+        #    print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
+        #        (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+        #print "Minimal Chi: ", min(chis) 
             
     
     def simulation(self, natA, natB, strategy):
@@ -1680,21 +1696,33 @@ class NatSimulation:
         n = ex*ex / (var-ex)
         p = ex/n
         
+        if p>1:
+            p = 1/p
+            n = ex/p
+        
+        return self.goodMatchBinomialNP(n, p, observed, bins, iterations, matchBoth, verbose)
+    
+    def goodMatchBinomialNP(self, n, p, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
+        '''
+        Performs Chi-Squared test that given data comes from binomial distribution.
+        Number of bins to sample from poisson=0..bins
+        '''
+        
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * binom.pmf(i, n, p)) for i in range(0, bins)]
-        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose)
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
         return (chi, pval, n, p)
     
-    def goodMatchPoisson(self, lmbd, observed, bins, iterations, matchBoth=True, verbose=False):
+    def goodMatchPoisson(self, lmbd, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
         '''
         Performs Chi-Squared test that given data comes from Poisson distribution with given lambda
         Number of bins to sample from poisson=0..bins
         '''        
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * poisson.pmf(i, lmbd)) for i in range(0, bins)]
-        return self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose)
+        return self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
     
-    def goodMatchDistribution(self, observed, expected, bins, iterations, matchBoth=True, verbose=False):
+    def goodMatchDistribution(self, observed, expected, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
         '''
         Performs Chi-Squared test that given data comes from a given distribution.
         Number of bins to sample from distribution=0..bins
@@ -1711,8 +1739,8 @@ class NatSimulation:
         # intersection on ports
         bothGt5 = list(set(idxExGt5) & set(idxObsGt5))
         bothGt5.sort()
-        if bothGt5 == None or len(bothGt5)<5:
-            print "Warning! too few matching indices: %d" % len(bothGt5)
+        if bothGt5 == None or len(bothGt5)<3:
+            if verbose: print "Warning! too few matching indices: %d" % len(bothGt5)
             return (0.0,0.0)
         
         # expected values having counts higher-and-equal than 5
@@ -1720,6 +1748,9 @@ class NatSimulation:
         
         # new observed array - select only those ports from passed array that are in idxExGt5
         obsTest  = [observed[i] for i in bothGt5]
+        
+        if wiseBinning:
+            expTest, obsTest = self.unimodalWiseBinning(observed, expected)
         
         if verbose:
             print "matching both:\n", bothGt5
@@ -1731,6 +1762,48 @@ class NatSimulation:
     
     # Here ends the class
     pass
+
+    def unimodalWiseBinning(self, observed, expected):
+        '''
+        Based on partitioning with r>=0, k>=3 s.t. we have classes r,r+1,r+2,...,r+k-2,r+k-1
+        border classes contains sum of outer intervals.
+        In this method are observed values partitioned and expected are set accorditionally.
+        
+        Yarnold's [Yarnold 1970, Eaton 1978] criterium: works if n*p_i >= 5q forall i=1,..,k, where k>=3.
+        q is a ratio of classes s.t. n*p_i < 5
+        
+        Iterate over observed (empirical) distribution and find r,k. Assumption - distribution is unimodal
+        '''
+        
+        # 1. find maximum
+        beg,end,maxidx=-1,-1,-1
+        for i,val in enumerate(observed):
+            if maxidx==-1 or (observed[maxidx] < val): maxidx=i
+            
+        if observed[maxidx] < 5: 
+            return (0.0,0.0)
+        
+        # 2. iterate on both sides away from maximum - peak of an unimodal distribution
+        for i in range(0, len(observed)):
+            lft, rgt = maxidx-i, maxidx+i
+            if beg==-1 and lft>=0 and observed[lft]<5: beg=lft
+            if end==-1 and rgt<len(observed) and observed[rgt]<5: end=rgt
+        if beg==-1: beg=0
+        if end==-1: end=len(observed)-1
+        
+        # 3. generate categories, handle boundary categories that are sums
+        expTest, obsTest = [], []
+        # Left border category
+        expTest.append(sum([j for i,j in enumerate(observed) if i<=beg]))
+        obsTest.append(sum([j for i,j in enumerate(expected) if i<=beg]))
+        # Inside
+        expTest.extend([j for i,j in enumerate(observed) if i>beg and i<end])
+        obsTest.extend([j for i,j in enumerate(expected) if i>beg and i<end])
+        # Right border category
+        expTest.append(sum([j for i,j in enumerate(observed) if i>=end]))
+        obsTest.append(sum([j for i,j in enumerate(expected) if i>=end]))
+        
+        return (expTest, obsTest)
     
 # main executable code    
 
