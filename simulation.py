@@ -838,10 +838,26 @@ class NatSimulation:
         
         return (tpl, startUtc) 
     
+    def nfdumpReaderGenerator(self, fo):
+        '''
+        nfdump generator reads already sorted records in format "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp"
+        Just reads the file and parses nfdump format to tuple.
+        '''
+        while True:
+            line = fo.readline()
+            if not line:
+                break
+            tpl, startUtc = self.nfline2tuple(line)
+            yield (startUtc, tpl)
+        
     def nfdumpSortedGenerator(self, filename, filt=None, activeTimeout=300*1000):
         '''
-        Generator object producing nfdump lines for a given filename. Records are sorted by first seen time.
-        Using heap and internal logic to sort. 
+        Generator object producing nfdump lines for a given filename for nfdump file. 
+        Records are sorted by first seen time in this generator since nfdump records does not have to be sorted by default.
+        (Probe stored records by its internal logic)
+        
+        Using heap to sort by maintaining some amount of records in memory in priority queue 
+        and taking minimal element if have enough elements and sufficient precision. 
         '''    
         cnt = 0
         cmdLine = 'nfdump -q -r "%s" -o "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" "%s"' % (filename, filt if filt!=None else "")
@@ -862,12 +878,15 @@ class NatSimulation:
             # Flag determines whether there was some line added to the queue => new event read.
             lineAdded = False
             
-            # Parse output format to variables.
+            # Parse output format to tuple.
             # Partial sort by heap.
+            #
+            # Read line if there is something to read and process didn't finish
+            # in previous round.
             if line!=None and len(line)>0 and isDead==False:
                 tpl, startUtc = self.nfline2tuple(line)
                 
-                # Add record to the priority queue by time
+                # Add record to the priority queue sorted by first seen time
                 heappush(buff, (startUtc, tpl))
                 lineAdded = True
                 
@@ -876,6 +895,7 @@ class NatSimulation:
                 # to be completely sorted w.r.t. whole data set since the biggest gap 
                 # in nearly-sorted block is of size active timeout (probe added flow to file
                 # when active timeout was expired). The next entry cannot be smaller. 
+                # Just to be sure - require at least 10 000 elements in priority queue.
                 if (startUtc - buff[0][0]) > activeTimeout and len(buff) >= 10000:
                     isSorted=True 
                     #print "Sorted event... cnt=%d, min=%s, curr=%s, diff=%s" % (cnt, buff[0][0], startUtc, (startUtc - buff[0][0]))
@@ -887,7 +907,7 @@ class NatSimulation:
                 isSorted=True
 
             # If line was added and queue is not ready, then continue (still can read some data,
-            # program is still running, so wait to fill queue)
+            # program is still running, so wait to fill the queue)
             if lineAdded and not isSorted and retcode is None: 
                 if (cnt % 1000) == 0: 
                     sys.stdout.write('.')
@@ -907,7 +927,7 @@ class NatSimulation:
             pass
         pass
     
-    def nfdumpSimulation(self, filename, natA, homeNet='', filt=None):
+    def nfdumpSimulation(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None):
         '''
         Reads nfdump file with given filter and simulates NAT
         '''
@@ -917,81 +937,30 @@ class NatSimulation:
         #
         cnt = 0
         activeTimeout = 300*1000 # active timeout = time after a long lived flow is ended and written to a netflow file
-        cmdLine = 'nfdump -q -r "%s" -o "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" "%s"' % (filename, filt if filt!=None else "")
-        print "Starting NAT simulation from netflow file, command line used: %s" % cmdLine
-        
-        p = subprocess.Popen(cmdLine, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
-        print "Data loaded, going to process output..."
-        
-        isDead = False
-        buff = []
+
         lastSampleTime = 0
         lastSamplePort = 0
         lastStart = -1
         lastFree = natA.poolLen
         samplesRes = []
-        sampleSize = 1000
+        sampleSize = 10000
         
-        nfdumpGenerator = self.nfdumpSortedGenerator(filename, filt, activeTimeout)
-        #for tplpopped in 
+        # Prepare nfdump record generator.
+        nfdumpGenerator = None
+        fileObject = None
+        if processedNfdump!=None:
+            fileObject = open(processedNfdump, "r+")
+            nfdumpGenerator = self.nfdumpReaderGenerator(fileObject)
+        else:
+            nfdumpGenerator = self.nfdumpSortedGenerator(filename, filt, activeTimeout)
         
-        while(True):         # while there is something to run
+        # iterate over lines
+        for tplpopped in nfdumpGenerator:
             cnt += 1
-            retcode = p.poll() #returns None while subprocess is running
-            line = p.stdout.readline()
-            
-            # Flag determines whether queue sort is consistent with absolute sort w.r.t. whole data set.  
-            isSorted = False
-            # Flag determines whether there was some line added to the queue => new event read.
-            lineAdded = False
-            
-            # Parse output format to variables.
-            # Partial sort by heap.
-            if line!=None and len(line)>0 and isDead==False:
-                tpl, startUtc = self.nfline2tuple(line)
-                
-                # Add record to the priority queue by time
-                heappush(buff, (startUtc, tpl))
-                lineAdded = True
-                
-                # If time difference between current element and minimal one in queue is 
-                # greater than active timeout, we have probably enough data in queue
-                # to be completely sorted w.r.t. whole data set since the biggest gap 
-                # in nearly-sorted block is of size active timeout (probe added flow to file
-                # when active timeout was expired). The next entry cannot be smaller. 
-                if (startUtc - buff[0][0]) > activeTimeout:
-                    isSorted=True 
-                    #print "Sorted event... cnt=%d, min=%s, curr=%s, diff=%s" % (cnt, buff[0][0], startUtc, (startUtc - buff[0][0]))
-
-            # If program is dead skip the line parsing in the next iteration and set data 
-            # in the priority queue as prepared to be processed.
-            if retcode is not None: 
-                isDead=True
-                isSorted=True
-
-            # If line was added and queue is not ready, then continue (still can read some data,
-            # program is still running, so wait to fill queue)
-            if lineAdded and not isSorted and retcode is None: 
-                if (cnt % 1000) == 0: 
-                    sys.stdout.write('.')
-                    sys.stdout.flush()
-                continue
-            
-            # If there is nothing to process then we are done...
-            if len(buff)==0:
-                break
-            
-            tplpopped = heappop(buff)
             if tplpopped == None or tplpopped[1] == None \
-                or tplpopped[1][0] == None \
-                or tplpopped[1][1] == None \
-                or tplpopped[1][2] == None \
-                or tplpopped[1][3] == None \
-                or tplpopped[1][4] == None \
-                or tplpopped[1][5] == None \
-                or tplpopped[1][6] == None \
-                or tplpopped[1][7] == None \
-                or tplpopped[1][8] == None:
+                or tplpopped[1][0] == None or tplpopped[1][1] == None or tplpopped[1][2] == None \
+                or tplpopped[1][3] == None or tplpopped[1][4] == None or tplpopped[1][5] == None \
+                or tplpopped[1][6] == None or tplpopped[1][7] == None or tplpopped[1][8] == None:
                 continue
             
             tstart,tdur,proto,srcIP,srcPort,dstIP,dstPort,startUtc,lastData = tplpopped[1]
@@ -1010,14 +979,14 @@ class NatSimulation:
                     newTimeBlocks = startUtc/(self.portScanInterval) - lastSampleTime
                     if newTimeBlocks>1: # has to fill gaps where no event happened -> 0
                         for tmpi in range(lastStart,lastStart+newTimeBlocks-1):
-                            samplesRes.append(0+1)
+                            samplesRes.append(0)
                             #print "Sample: time=%s; utc=%s; new connections=%d, lastPortSampled=%d, curPortSampled=%d GAP" % (tmpi*self.portScanInterval, startUtc, 0, lastSamplePort, lastPort)
                     
                     lastStart += newTimeBlocks
                 #print "Sample: time=%s; utc=%s; new connections=%d, lastPortSampled=%d, curPortSampled=%d" % (lastStart*self.portScanInterval, startUtc, curSampleConn, lastSamplePort, lastPort)
                 sys.stdout.write('x')
                 sys.stdout.flush()
-                samplesRes.append(curSampleConn+1)
+                samplesRes.append(curSampleConn)
                 
                 lastSamplePort = lastPort
                 lastSampleTime = startUtc/(self.portScanInterval)
@@ -1037,9 +1006,23 @@ class NatSimulation:
                 lastFree     = nowFreePorts
                 print "Hah, extPort=%s, free=%s, newCon=%s, time=%s, srchome=%s\n" % (extPort, nowFreePorts, newConn, startUtc, fromHome)
         
-        minE = min(samplesRes)
+        # kill subprocess if exists
+        if self.proc!=None:
+            try:
+                self.proc.kill()
+            except Exception, e:
+                pass
+        # close file if exists
+        if fileObject != None:
+            try:
+                fileObject.close()
+            except Exception, e:
+                pass
+        
+        # process data
         maxE = max(samplesRes)+1
-        print "Sampling done..."
+        print "Sampling done... max=%d" % maxE
+        
         distrib = [0] * (maxE)
         sampleSize=len(samplesRes)
         for i in samplesRes: 
@@ -1051,7 +1034,7 @@ class NatSimulation:
         for i in range(0,500):
             lmbd = 0.0 + float(i)*0.1
             (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSize, False)
-            print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
+            print "Chi-Squared test on match with Po(%04.4f): Chi: %06.3f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
                 (lmbd, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
             
     
@@ -1758,6 +1741,7 @@ if __name__ == "__main__":
     parser.add_argument('-d','--dot',help='Graphviz dot illustration', required=False, type=int, default=0)
     parser.add_argument('-a','--ascii',help='Ascii illustration', required=False, type=int, default=0)
     parser.add_argument('-n','--nfdump',help='NFdump file', required=False, default=None)
+    parser.add_argument('-m','--nfdump_sorted',help='NFdump sorted file', required=False, default=None)
     parser.add_argument('-f','--filter',help='NFdump filter', required=False, default=None)
     parser.add_argument('-g','--hostnet',help='NFdump host address', required=False, default="0.0.0.0")
     args = parser.parse_args()
@@ -1814,9 +1798,12 @@ if __name__ == "__main__":
     ns.silentPeriodBase=0
     ns.silentPeriodlmbd=0
     
-    # NFdump simulation from dump file
+    # NFdump simulation from dump file 
     if args.nfdump != None:
-        ns.nfdumpSimulation(args.nfdump, natA, args.hostnet, args.filter)
+        ns.nfdumpSimulation(natA, filename=args.nfdump, homeNet=args.hostnet, filt=args.filter)
+        sys.exit(0)
+    if args.nfdump_sorted != None:
+        ns.nfdumpSimulation(natA, processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter)
         sys.exit(0)
     
     #ns.simulation(natA, natB, strategy)
