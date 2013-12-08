@@ -944,9 +944,11 @@ class NatSimulation:
         lastStart = -1
         lastFree = natA.poolLen
         samplesRes = []
-        sampleSize = 1000
+        sampleSize = 500
         sampleSkip = 5000
         curTestSize=0
+        curBlock=0
+        fileDesc = 't%04d_s%05d_sk%05d' % (self.portScanInterval, sampleSize, sampleSkip)
         
         # Prepare nfdump record generator.
         nfdumpGenerator = None
@@ -1006,6 +1008,9 @@ class NatSimulation:
                 lastSamplePort = lastPort
                 lastSampleTime = startUtc/(self.portScanInterval)
                 #if len(samplesRes) >= sampleSize: break
+                
+                # colelcted samples
+                curTestSize+=1
             pass
             
             # Allocate to NAT
@@ -1024,20 +1029,20 @@ class NatSimulation:
                 print "Hah, extPort=%s, free=%s, newCon=%s, time=%s, srchome=%s\n" % (extPort, nowFreePorts, newConn, startUtc, fromHome)
             
             if curTestSize<sampleSize: 
-                curTestSize+=1
                 continue
             
             # Process & analyze data
             maxE = max(samplesRes)+1
-            print "Sampling done... max=%d, sampleSize=%d target=%d" % (maxE, curTestSize, sampleSize)
-            
+            # Convert list of port numbers in each sample to frequency distribution
             distrib = [0] * (maxE)
             sampleSizeR=len(samplesRes)
             for i in samplesRes: 
                 distrib[i]+=1
             
             ssum, ex, var, stdev = self.calcPortDistribInfo(distrib, sampleSizeR)
-            files = None #['nfdump.pdf', 'nfdump.png', 'nfdump.svg']
+            files = [('distrib/nfdump_' + fileDesc + ("_%04d" % curBlock) + tmpf) for tmpf in ['.pdf', '.png', '.svg']]
+            
+            print "Sampling done... max=%d, sampleSize=%d target=%d sum=%d" % (maxE, curTestSize, sampleSize, sum(distrib))
             
             chis = [9999999]
             for i in range(0,0): #200
@@ -1052,7 +1057,7 @@ class NatSimulation:
             chis = [9999999]
             for i in range(0,0): #200
                 lmbd = max(ex-10.0,0) + float(i)*0.1
-                (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSizeR, False, wiseBinning=True)
+                (chi, pval, tmp_n, tmp_p, m1) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSizeR, False, wiseBinning=True)
                 if chi==0 or chi>1000.0: continue
                 if chi>0: chis.append(chi)
                 print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
@@ -1060,12 +1065,12 @@ class NatSimulation:
             print "Minimal Chi: ", min(chis)
             
             # Negative binomial try
-            (chi, pval, tmp_n, tmp_p) = self.goodMatchNegativeBinomial(ex, var, distrib, maxE, sampleSizeR, False, wiseBinning=False)
+            (chi, pval, tmp_n, tmp_p, m2) = self.goodMatchNegativeBinomial(ex, var, distrib, maxE, sampleSizeR, False, wiseBinning=False)
             print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
                 (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
             
-            print "\nDistribution: ", distrib 
-            self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=False)
+            print "\nBlock=%04d, Distribution: " % curBlock, distrib 
+            self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=True)
             print "=" * 180
             
             # State reset for next iteration
@@ -1076,6 +1081,7 @@ class NatSimulation:
             lastFree = natA.poolLen
             samplesRes = []
             natA.reset()
+            curBlock+=1
         
         # kill subprocess if exists
         if self.proc!=None:
@@ -1083,15 +1089,13 @@ class NatSimulation:
                 self.proc.kill()
             except Exception, e:
                 pass
+            
         # close file if exists
         if fileObject != None:
             try:
                 fileObject.close()
             except Exception, e:
                 pass
-        
-        
-            
     
     def simulation(self, natA, natB, strategy):
         '''
@@ -1656,21 +1660,21 @@ class NatSimulation:
         # Thus for E[X] = ex, Ex[S] = i + i*T*lambda.  
         if step!=-1:
             (chi_p2, pval_p2, m2) = self.goodMatchPoisson(ex-step, portDistrib, ports, iterations, shift=int(step * (-1)))
-            print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
-                (ex/2, chi_p2, pval_p2, "is REJECTED" if pval_p2 < 0.05 else "holds")#
+            print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
+                (('%04.4f' % ex/2).zfill(8), ('%04.4f' % chi_p2).zfill(10), pval_p2, "is REJECTED" if pval_p2 < 0.05 else "holds      ", self.pearsonCorelation(m2, portDistrib))#
         
         (chi_p, pval_p, m1) = self.goodMatchPoisson(ex, portDistrib, ports, iterations, shift=0)
-        print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
-            (ex, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
+        print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
+            (('%04.4f' % ex).zfill(8), ('%04.4f' % chi_p).zfill(10), pval_p, "is REJECTED" if pval_p < 0.05 else "holds      ", self.pearsonCorelation(m1, portDistrib))
             
         (chi, pval, tmp_n, tmp_p, m3) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
-        print "Chi-Squared test on match with Bi(%04d, %04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
-            (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")        
+        print "Chi-Squared test on match with Bi(%04d, %04.4f): Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
+            (tmp_n, tmp_p, ('%04.4f' % chi).zfill(10), pval, "is REJECTED" if pval < 0.05 else "holds      ", self.pearsonCorelation(m3, portDistrib))        
 
         # Negative binomial try - for real data from netflow
         (chi, pval, tmp_n, tmp_p, m4) = self.goodMatchNegativeBinomial(ex, var, portDistrib, ports, iterations, False, wiseBinning=True)
-        print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
-            (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+        print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
+            (tmp_n, tmp_p, ('%04.4f' % chi).zfill(10), pval, "is REJECTED" if pval < 0.05 else "holds      ", self.pearsonCorelation(m4, portDistrib))
             
         #
         # Draw a histogram
@@ -1695,8 +1699,8 @@ class NatSimulation:
             
             plt.bar(pos, portDistrib, width, color='r')
             plt.plot(pos, m1, 'g^')
-            plt.plot(pos, m3, 'k-')
-            plt.plot(pos, m4, 'y+')
+            plt.plot(pos, m3, 'c>')
+            plt.plot(pos, m4, 'yp')
             if step!=-1:
                 plt.plot(pos, m2, 'b^')
             
@@ -1717,6 +1721,23 @@ class NatSimulation:
                 'chi_p': chi_p, 'pval_p': pval_p, 
                 'chi': chi, 'pval': pval, 'n': tmp_n, 'p': tmp_p
                 }
+    
+    def pearsonCorelation(self, model, observed):
+        '''
+        Computes Pearson's corerlation coefficient on observed data and model. Model and observed data has
+        be in same bins.
+        
+        https://en.wikipedia.org/wiki/Pearson_product-moment_correlation_coefficient 
+        '''
+        nmodel = np.array(model)
+        nobs   = np.array(observed)
+        
+        meanMod = nmodel.mean()
+        meanObs = nobs.mean()
+        
+        numerator   = sum((nmodel-meanMod)*(nobs-meanObs)) 
+        denumerator = math.sqrt(sum((nmodel-meanMod)**2)) * math.sqrt(sum((nobs-meanObs)**2))  
+        return (numerator / denumerator) 
         
     def calcPortDistribInfo(self, portDistrib, iterations):
         '''
@@ -1884,8 +1905,8 @@ class NatSimulation:
         for i,val in enumerate(observed):
             if maxidx==-1 or (observed[maxidx] < val): maxidx=i
             
-        if observed[maxidx] < 5: 
-            return (0.0,0.0)
+        if observed[maxidx] < limit: 
+            return (0.0,0.0,0.0)
         
         # 2. iterate on both sides away from maximum - peak of an unimodal distribution
         for i in range(0, len(observed)):
@@ -1934,7 +1955,12 @@ class NatSimulation:
         #print "exp:", expTest
         return (obsTest, expTest)
     
-# main executable code    
+    @staticmethod
+    def pearson(vect, y):
+        ss_err=(vect**2).sum()
+        ss_tot=((y-y.mean())**2).sum()
+        rsquared=1-(ss_err/ss_tot)
+        return rsquared
 
     # Here ends the class
     pass
@@ -2020,7 +2046,7 @@ if __name__ == "__main__":
     
     # Their
     #strategy.delta = [200, 200]
-    ns.portDistributionFunction(0.1, 20, range(90,180), [])
+    ns.portDistributionFunction(0.1, 20, range(1,180), [])
     print "Port distribution done..."
     sys.exit(3)
     
