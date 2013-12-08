@@ -13,6 +13,7 @@ import subprocess
 from optparse import OptionParser
 import copy
 from scipy.stats import binom
+from scipy.stats import nbinom
 from scipy.stats import norm
 from scipy.stats import poisson
 from scipy.stats import chisquare
@@ -944,6 +945,8 @@ class NatSimulation:
         lastFree = natA.poolLen
         samplesRes = []
         sampleSize = 1000
+        sampleSkip = 5000
+        curTestSize=0
         
         # Prepare nfdump record generator.
         nfdumpGenerator = None
@@ -963,6 +966,17 @@ class NatSimulation:
                 or tplpopped[1][6] == None or tplpopped[1][7] == None or tplpopped[1][8] == None:
                 continue
             
+            # If loop already started inform user.
+            if cnt == 1:
+                print "Starting with analysis..."
+            
+            # Sample skip - beginning of the file may be non-ideal (already opened connections, ...)
+            if cnt < sampleSkip:
+                if (cnt % 10000) == 0: 
+                    sys.stdout.write('s')
+                    sys.stdout.flush()
+                continue
+            
             tstart,tdur,proto,srcIP,srcPort,dstIP,dstPort,startUtc,lastData = tplpopped[1]
             fromHome = srcIP.startswith(homeNet)    # Is connection made from our network?
             
@@ -979,18 +993,19 @@ class NatSimulation:
                     newTimeBlocks = startUtc/(self.portScanInterval) - lastSampleTime
                     if newTimeBlocks>1: # has to fill gaps where no event happened -> 0
                         for tmpi in range(lastStart,lastStart+newTimeBlocks-1):
+                            #sys.stdout.write('g')
                             samplesRes.append(0)
                             #print "Sample: time=%s; utc=%s; new connections=%d, lastPortSampled=%d, curPortSampled=%d GAP" % (tmpi*self.portScanInterval, startUtc, 0, lastSamplePort, lastPort)
                     
                     lastStart += newTimeBlocks
                 #print "Sample: time=%s; utc=%s; new connections=%d, lastPortSampled=%d, curPortSampled=%d" % (lastStart*self.portScanInterval, startUtc, curSampleConn, lastSamplePort, lastPort)
-                sys.stdout.write('x')
-                sys.stdout.flush()
+                #sys.stdout.write('x')
+                #sys.stdout.flush()
                 samplesRes.append(curSampleConn)
                 
                 lastSamplePort = lastPort
                 lastSampleTime = startUtc/(self.portScanInterval)
-                if len(samplesRes) >= sampleSize: break
+                #if len(samplesRes) >= sampleSize: break
             pass
             
             # Allocate to NAT
@@ -1007,6 +1022,60 @@ class NatSimulation:
                 newConn      = lastFree - nowFreePorts
                 lastFree     = nowFreePorts
                 print "Hah, extPort=%s, free=%s, newCon=%s, time=%s, srchome=%s\n" % (extPort, nowFreePorts, newConn, startUtc, fromHome)
+            
+            if curTestSize<sampleSize: 
+                curTestSize+=1
+                continue
+            
+            # Process & analyze data
+            maxE = max(samplesRes)+1
+            print "Sampling done... max=%d, sampleSize=%d target=%d" % (maxE, curTestSize, sampleSize)
+            
+            distrib = [0] * (maxE)
+            sampleSizeR=len(samplesRes)
+            for i in samplesRes: 
+                distrib[i]+=1
+            
+            ssum, ex, var, stdev = self.calcPortDistribInfo(distrib, sampleSizeR)
+            files = None #['nfdump.pdf', 'nfdump.png', 'nfdump.svg']
+            
+            chis = [9999999]
+            for i in range(0,0): #200
+                lmbd = max(ex-10.0,0) + float(i)*0.1
+                (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSizeR, True, wiseBinning=True)
+                if chi_p==0 or chi_p>700.0: continue
+                if chi_p > 0: chis.append(chi_p)
+                print "Chi-Squared test on match with Po(%04.4f): Chi: %06.3f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
+                    (lmbd, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
+            print "Minimal Chi: ", min(chis)
+            
+            chis = [9999999]
+            for i in range(0,0): #200
+                lmbd = max(ex-10.0,0) + float(i)*0.1
+                (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSizeR, False, wiseBinning=True)
+                if chi==0 or chi>1000.0: continue
+                if chi>0: chis.append(chi)
+                print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
+                    (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+            print "Minimal Chi: ", min(chis)
+            
+            # Negative binomial try
+            (chi, pval, tmp_n, tmp_p) = self.goodMatchNegativeBinomial(ex, var, distrib, maxE, sampleSizeR, False, wiseBinning=False)
+            print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
+                (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+            
+            print "\nDistribution: ", distrib 
+            self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=False)
+            print "=" * 180
+            
+            # State reset for next iteration
+            curTestSize = 0
+            lastSampleTime = 0
+            lastSamplePort = 0
+            lastStart = -1
+            lastFree = natA.poolLen
+            samplesRes = []
+            natA.reset()
         
         # kill subprocess if exists
         if self.proc!=None:
@@ -1021,37 +1090,7 @@ class NatSimulation:
             except Exception, e:
                 pass
         
-        # process data
-        maxE = max(samplesRes)+1
-        print "Sampling done... max=%d" % maxE
         
-        distrib = [0] * (maxE)
-        sampleSize=len(samplesRes)
-        for i in samplesRes: 
-            distrib[i]+=1
-        print "Distribution: ", distrib 
-        
-        (ssum, ex, var, stdev) = self.calcPortDistribInfo(distrib, sampleSize)
-        self.histAndStatisticsPortDistrib(distrib, sampleSize, maxE, ['nfdump.pdf', 'nfdump.png', 'nfdump.svg'], drawHist=True)
-        
-        chis = [9999999]
-        for i in range(0,200):
-            lmbd = max(ex-10.0,0) + float(i)*0.1
-            (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSize, True, wiseBinning=True)
-            if chi_p==0 or chi_p>1000.0: continue
-            if chi_p > 0: chis.append(chi_p)
-            print "Chi-Squared test on match with Po(%04.4f): Chi: %06.3f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
-                (lmbd, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
-        print "Minimal Chi: ", min(chis)
-        
-        chis = [9999999]
-        for i in range(0,0):
-            lmbd = max(ex-10.0,0) + float(i)*0.1
-            (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSize, False, wiseBinning=True)
-            if chi>0: chis.append(chi)
-            print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
-                (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
-        print "Minimal Chi: ", min(chis) 
             
     
     def simulation(self, natA, natB, strategy):
@@ -1556,7 +1595,9 @@ class NatSimulation:
                 sys.stdout.write('x')
                 continue
             
-            # Add ports to distribution
+            # Add ports to distribution.
+            # We are computing probability dostribution on ports in particular 
+            # time step.
             for step in portsArr:
                 curPort = portsArr[step]
                 
@@ -1584,7 +1625,7 @@ class NatSimulation:
             print "\n", "="*80
             print "Step %03d" % step
             
-            res = self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step), drawHist=True)
+            res = self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step), drawHist=True, step=step)
             ns.append(res['n'])
             ps.append(res['p'])
         
@@ -1594,31 +1635,43 @@ class NatSimulation:
         #print "ns = [", ", ".join(nsString), "]"
         #print "ps = [", ", ".join(psString), "]"
     
-    def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None, drawHist=False):
+    def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None, drawHist=False, step=-1):
         '''
         Compute basic statistics of a given distribution, draws histrogram.
         '''
-        chi_p, pval_p, chi, pval, tmp_n, tmp_p = 0, 0, 0, 0, 0, 0
+        chi_p, pval_p, chi, pval, tmp_n, tmp_p, chi_p2, pval_p2, m2 = 0, 0, 0, 0, 0, 0, 0, 0, 0
         
         #
         # Compute basic statistics
         #
         (ssum, ex, var, stdev) = self.calcPortDistribInfo(portDistrib, iterations)
         print "E[x] = %04.2f;  V[x] = %04.2f;  stddev = %04.2f;  sum=%05d; Distribution:" % (ex, var, stdev, ssum)
-        print "dist=[",(" ".join([ '%04d=%01.5f, %s' % (i, i/float(iterations), "\n" if (p % 40) == 39 else '') for p, i in enumerate(portDistrib)])),"]"
         print "totalp=", sum([i/float(iterations) for i in portDistrib])
+        #print "dist=[",(" ".join([ '%04d=%01.5f, %s' % (i, i/float(iterations), "\n" if (p % 40) == 39 else '') for p, i in enumerate(portDistrib)])),"]"
         
         #
         # Try to approximate with poisson distribution and binomial distribution
-        #
-        (chi_p, pval_p) = self.goodMatchPoisson(ex, portDistrib, ports, iterations)
+        # Sum of N independent Po: Po(l)+Po(l)+...+Po(l) =~ Po(lN), incrementing by 1 in each step 
+        # the expected value is shifted in i-th round by i to the right, but lamda is still same! 
+        # Thus for E[X] = ex, Ex[S] = i + i*T*lambda.  
+        if step!=-1:
+            (chi_p2, pval_p2, m2) = self.goodMatchPoisson(ex-step, portDistrib, ports, iterations, shift=int(step * (-1)))
+            print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
+                (ex/2, chi_p2, pval_p2, "is REJECTED" if pval_p2 < 0.05 else "holds")#
+        
+        (chi_p, pval_p, m1) = self.goodMatchPoisson(ex, portDistrib, ports, iterations, shift=0)
         print "Chi-Squared test on match with Po(%04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
             (ex, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
             
-        (chi, pval, tmp_n, tmp_p) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
-        print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
+        (chi, pval, tmp_n, tmp_p, m3) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
+        print "Chi-Squared test on match with Bi(%04d, %04.4f): Chi: %04.4f, p-value=%01.18f; alpha=0.05; hypothesis %s" % \
             (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")        
 
+        # Negative binomial try - for real data from netflow
+        (chi, pval, tmp_n, tmp_p, m4) = self.goodMatchNegativeBinomial(ex, var, portDistrib, ports, iterations, False, wiseBinning=True)
+        print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
+            (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
+            
         #
         # Draw a histogram
         #
@@ -1628,12 +1681,26 @@ class NatSimulation:
             
             ax = plt.axes()
             ax.set_xticks(pos + (width / 2))
-            ax.set_xticklabels(range(0, ports), rotation=90, size='x-small')
+            ax.set_xticklabels(range(0, ports), rotation=90, size='xx-small')
+            
+            plt.xlabel('port')
+            plt.ylabel('frequency') #,rotation='horizontal')
+            plt.grid(True)
+
             if histWidth != None:
                 ax.set_ylim([0,histWidth])
-            plt.bar(pos, portDistrib, width, color='r')
             
-            if fname!= None:
+            (tlow, thigh, tmax) = self.unimodalLowIdx(portDistrib, 1)   # set limits on X axis to show only values above 0    
+            plt.xlim(tlow,thigh)
+            
+            plt.bar(pos, portDistrib, width, color='r')
+            plt.plot(pos, m1, 'g^')
+            plt.plot(pos, m3, 'k-')
+            plt.plot(pos, m4, 'y+')
+            if step!=-1:
+                plt.plot(pos, m2, 'b^')
+            
+            if fname != None:
                 if isinstance(fname, list):
                     for fname_i in fname:
                         try:
@@ -1673,7 +1740,7 @@ class NatSimulation:
             var += count * ((port - ex) * (port - ex))
             cn  += count
             
-        var = var / float(cn) if cn>0 else 0
+        var = var / (float(cn)-1) if cn>1 else 0
         stdev = math.sqrt(var)
         return (ssum, ex, var, stdev)
     
@@ -1690,37 +1757,83 @@ class NatSimulation:
         ex  = float(ex)
         var = float(var)
         
-        #p = (ex-var) / ex
-        #n = ex / p
+        p = (ex-var) / ex
+        n = ex / p
         
-        n = ex*ex / (var-ex)
-        p = ex/n
+        if n<0: n = -1*n
+        if p<0: p = -1*p
         
-        if p>1:
-            p = 1/p
-            n = ex/p
+        #n = ex*ex / (var-ex)
+        #p = ex/n
         
-        return self.goodMatchBinomialNP(n, p, observed, bins, iterations, matchBoth, verbose, wiseBinning)
+#        if p<0:
+#            p=1+p
+#            n=ex/p
+#        
+#        if p>1:
+#            p = 1/p
+#            n = ex/p
+        
+        return self.goodMatchBinomialNP(int(n), p, observed, bins, iterations, matchBoth, verbose, wiseBinning)
     
     def goodMatchBinomialNP(self, n, p, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
         '''
         Performs Chi-Squared test that given data comes from binomial distribution.
         Number of bins to sample from poisson=0..bins
         '''
+        n = int(n)
         
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * binom.pmf(i, n, p)) for i in range(0, bins)]
         (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
-        return (chi, pval, n, p)
+        return (chi, pval, n, p, expected)
     
-    def goodMatchPoisson(self, lmbd, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
+    def goodMatchNegativeBinomial(self, ex, var, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
+        '''
+        Performs Chi-Squared test that given data comes from negative binomial distribution.
+        Number of bins to sample from poisson=0..bins
+        '''
+        # X ~ NBinom(n, p)
+        # E[x] = np/(1-p)
+        # V[x] = np/(1-p)^2
+        if var == 0 or ex<0: return (0.0, 0.0, 0.0, 0.0)
+        ex  = float(ex)
+        var = float(var)
+        
+        # Quadratic equation root. 
+        p = (2 - math.sqrt(4*ex/var)) / 2
+        if p==0: return (0,0,0,0)
+        if p<0: p = (2 - math.sqrt(2*ex/var)) / 2
+        if p<0: p = (2 - math.sqrt(ex/var)) / 2
+        n = round(ex*(1-p)/p)  
+        
+        return self.goodMatchNegativeBinomialNP(n, 1-p, observed, bins, iterations, matchBoth, verbose, wiseBinning)
+    
+    def goodMatchNegativeBinomialNP(self, n, p, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
+        '''
+        Performs Chi-Squared test that given data comes from negative binomial distribution.
+        Number of bins to sample from poisson=0..bins
+        '''
+        
+        # expected values - compute N * probability for each port assumed in range 0..bins
+        expected = [(iterations * nbinom.pmf(i, n, p)) for i in range(0, bins)]
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
+        return (chi, pval, n, p, expected)
+        
+    def goodMatchPoisson(self, lmbd, observed, bins, iterations, shift=0, matchBoth=True, verbose=False, wiseBinning=False):
         '''
         Performs Chi-Squared test that given data comes from Poisson distribution with given lambda
         Number of bins to sample from poisson=0..bins
+        
+        Poisson distribution is shifted by a given factor.
         '''        
         # expected values - compute N * probability for each port assumed in range 0..bins
-        expected = [(iterations * poisson.pmf(i, lmbd)) for i in range(0, bins)]
-        return self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
+        expected = [(iterations * poisson.pmf(i+shift, lmbd)) for i in range(0, bins)]
+        #print "shift=%d " % shift, expected
+        #print [(i+shift) for i in range(0, bins)]
+        #print "+"*80
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
+        return (chi, pval, expected) 
     
     def goodMatchDistribution(self, observed, expected, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
         '''
@@ -1750,7 +1863,7 @@ class NatSimulation:
         obsTest  = [observed[i] for i in bothGt5]
         
         if wiseBinning:
-            obsTest, expTest = self.unimodalWiseBinning(observed, expected)
+            obsTest, expTest = self.unimodalWiseBinning(observed, expected, True)
         
         if verbose:
             print "matching both:\n", bothGt5
@@ -1760,16 +1873,10 @@ class NatSimulation:
         # perform chi-squared test on distribution
         return chisquare(np.array(obsTest), f_exp=np.array(expTest))
 
-    def unimodalWiseBinning(self, observed, expected):
+    def unimodalLowIdx(self, observed, limit):
         '''
-        Based on partitioning with r>=0, k>=3 s.t. we have classes r,r+1,r+2,...,r+k-2,r+k-1
-        border classes contains sum of outer intervals.
-        In this method are observed values partitioned and expected are set accorditionally.
-        
-        Yarnold's [Yarnold 1970, Eaton 1978] criterium: works if n*p_i >= 5q forall i=1,..,k, where k>=3.
-        q is a ratio of classes s.t. n*p_i < 5
-        
-        Iterate over observed (empirical) distribution and find r,k. Assumption - distribution is unimodal
+        Assumes unimodal distribution in observed. Finds indexes on the left and on the right that are smaller than limit.
+        Is used to compute index limits for unimodal wise binning
         '''
         
         # 1. find maximum
@@ -1783,23 +1890,48 @@ class NatSimulation:
         # 2. iterate on both sides away from maximum - peak of an unimodal distribution
         for i in range(0, len(observed)):
             lft, rgt = maxidx-i, maxidx+i
-            if beg==-1 and lft>=0 and observed[lft]<5: beg=lft
-            if end==-1 and rgt<len(observed) and observed[rgt]<5: end=rgt
+            if beg==-1 and lft>=0            and observed[lft]<limit: beg=lft
+            if end==-1 and rgt<len(observed) and observed[rgt]<limit: end=rgt
         if beg==-1: beg=0
         if end==-1: end=len(observed)-1
         
-        # 3. generate categories, handle boundary categories that are sums
+        return (beg,end,maxidx)
+        
+    def unimodalWiseBinning(self, observed, expected, bothSides=False):
+        '''
+        Based on partitioning with r>=0, k>=3 s.t. we have classes r,r+1,r+2,...,r+k-2,r+k-1
+        border classes contains sum of outer intervals.
+        In this method are observed values partitioned and expected are set accorditionally.
+        
+        Yarnold's [Yarnold 1970, Eaton 1978] criterium: works if n*p_i >= 5q forall i=1,..,k, where k>=3.
+        q is a ratio of classes s.t. n*p_i < 5
+        
+        Iterate over observed (empirical) distribution and find r,k. Assumption - distribution is unimodal
+        '''
         obsTest, expTest = [], []
+        
+        beg,  end,  maxidx  = self.unimodalLowIdx(observed, 5)
+        beg2, end2, maxidx2 = 0, 0, 0
+        if bothSides:
+            beg2, end2, maxidx2 = self.unimodalLowIdx(expected, 5)
+            beg = max(beg, beg2)
+            end = min(end, end2)
+            if beg >= end: return (obsTest, expTest)
+        
+        if (end-beg)<=3: return (obsTest, expTest)
+        # 3. generate categories, handle boundary categories that are sums
+        
         # Left border category
         expTest.append(sum([j for i,j in enumerate(expected) if i<=beg]))
         obsTest.append(sum([j for i,j in enumerate(observed) if i<=beg]))
         # Inside
-        expTest.extend([j for i,j in enumerate(expected ) if i>beg and i<end])
+        expTest.extend([j for i,j in enumerate(expected) if i>beg and i<end])
         obsTest.extend([j for i,j in enumerate(observed) if i>beg and i<end])
         # Right border category
         expTest.append(sum([j for i,j in enumerate(expected) if i>=end]))
         obsTest.append(sum([j for i,j in enumerate(observed) if i>=end]))
-        
+        #print "obs:", obsTest
+        #print "exp:", expTest
         return (obsTest, expTest)
     
 # main executable code    
@@ -1888,7 +2020,8 @@ if __name__ == "__main__":
     
     # Their
     #strategy.delta = [200, 200]
-    ns.portDistributionFunction(0.1, 10, range(0,2), [99])
+    ns.portDistributionFunction(0.1, 20, range(90,180), [])
+    print "Port distribution done..."
     sys.exit(3)
     
     # generating graph for moving lambda
