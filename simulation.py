@@ -58,6 +58,7 @@ def probRound(x):
 
 def hashcode(s):
     h = 0
+    if isinstance(s, ( int, long ) ): return s
     for c in s:
         h = (31 * h + ord(c)) & 0xFFFFFFFF
     return ((h + 0x80000000) & 0xFFFFFFFF) - 0x80000000
@@ -83,7 +84,7 @@ class Nat:
     Base abstract class for NAT allocation
     '''
     
-    # timeout of a created connection in milli seconds
+    # timeout of a created connection in milliseconds
     timeout = 3*60*1000
     
     # port pool available for new allocations
@@ -333,8 +334,15 @@ class TheirStragegy(Strategy):
     Strategy of changing source port - published by other team
     '''
     delta = [1000,1000]
+    startPos=[0,0]
     def init(self, params=None):
         pass    
+    
+    def silent(self, time1, time2, lmbd):
+        self.delta = [int(time1*lmbd*6), int(time2*lmbd*6)]
+        self.startPos = self.delta
+        return self.delta
+        
     def next(self, party, step):
         if party==0: return (step,self.delta[0])
         if party==1: return (step,self.delta[1])
@@ -379,7 +387,8 @@ class I2JStragegy(Strategy):
         #
         # Use expected value instead of a random sample as a starting point. E(X) = lmbd, X ~ Po(lmbd)
         # should be the central.
-        self.startPos=[int(lmbd * time1), int(lmbd * time2)]
+        if lmbd >= 0.035:
+            self.startPos=[int(lmbd * time1), int(lmbd * time2)]
         #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
         return self.startPos
         
@@ -577,6 +586,35 @@ class PoissonStrategy(Strategy):
         
         #self.startPos[party] += 1+NatSimulation.poisson(self.lmbd, 10)#*(1+step*0.77))
         #return (0, int(self.startPos[party]))
+
+def getStrategy(desc):
+    '''
+    Returns strategy according to string identifier
+    '''
+    strategy = PoissonStrategy()
+    if desc == 'i2j':
+        print "I2J Strategy: "
+        strategy = I2JStragegy()
+    elif desc == 'ij':
+        print "IJ strategy"
+        strategy = IJStragegy()
+    elif desc == 'fibo':
+        print "Fibonacci strategy"
+        strategy = FiboStrategy()
+    elif desc == 'their':
+        print "Their strategy"
+        strategy = TheirStragegy()
+    elif desc == 'poisson':
+        print "Poisson strategy"    
+        strategy  = PoissonStrategy()
+    elif desc == 'binom':
+        print "Binomial strategy"    
+        strategy  = BinomialStrategy()
+    elif desc == 'simple':
+        print "Simple strategy"    
+        strategy  = SimpleStrategy()
+    
+    return strategy
 
 def nfline2tuple(line):
     '''
@@ -1018,7 +1056,8 @@ class NatSimulation:
         return nfline2tuple(line) 
        
     def nfdumpSampleGenerator(self, natA, nfgen, homeNet='147.250.',
-                              T=10, sampleSize=1000, recStartSkip=5000, sampleEachSkip=0, maxBlockSize=-1, activeTimeout = 300*1000):
+                              T=10, sampleSize=1000, recStartSkip=5000, recEachSkip=0, 
+                              sampleEachSkip=0, maxBlockSize=-1, activeTimeout = 300*1000):
         '''
         Simulates network traffic using provided nfdump file and simulates NAT. 
         Generate sequence of a new conenctions allocated, sampling each T milliseconds.
@@ -1028,6 +1067,7 @@ class NatSimulation:
         T                 = milliseconds sampling time, each sample is done after 
         sampleSize        = number of samples
         recStartSkip      = number of records to skip from the beginning of the file
+        recEachSkip       = number of records to skip after the one taken
         sampleEachSkip    = number of records
         maxBlockSize      = number of blocks to process (1 block = sampleSize samples)
         '''
@@ -1044,6 +1084,8 @@ class NatSimulation:
         samplePort = []         # sampling port numbers - whole process
         curTestSize=0
         curBlock=0
+        
+        recCurSkipCnt = 0       # number of records designated for skipping 
         
         # iterate over lines
         for tplpopped in nfgen:
@@ -1063,6 +1105,13 @@ class NatSimulation:
             
             tstart,tdur,proto,srcIP,srcPort,dstIP,dstPort,startUtc,lastData = tplpopped[1]
             fromHome = srcIP.startswith(homeNet)    # Is connection made from our network?
+            
+            # Skiping on record basis
+            if recEachSkip!=0:
+                recCurSkipCnt+=1
+                if recCurSkipCnt <= recEachSkip: continue
+                # No skip -> reset counter
+                recCurSkipCnt = 0
             
             #print tplpopped[1], fromHome
             # sample NAT state each X time units
@@ -1090,7 +1139,6 @@ class NatSimulation:
                 
                 lastSamplePort = lastPort
                 lastSampleTime = startUtc/(T)
-                #if len(samplesRes) >= sampleSize: break
                 
                 # collected samples
                 curTestSize+=1
@@ -1120,6 +1168,7 @@ class NatSimulation:
             curTestSize = 0
             lastSampleTime = 0
             lastSamplePort = 0
+            recCurSkipCnt  = 0
             lastStart = -1
             lastFree = natA.poolLen
             samplesRes = []
@@ -1129,7 +1178,7 @@ class NatSimulation:
             if curBlock >= maxBlockSize: break        
         pass
     
-    def nfdumpSimulation(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None):
+    def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None):
         '''
         Reads nfdump file with given filter and simulates NAT
         '''
@@ -1214,7 +1263,7 @@ class NatSimulation:
             if curBlock >= maxBlock: break
         
         # force generator de-initialization
-        nfdumpGenerator.deinit()
+        nfdumpObj.deinit()
         
         # evalueate statistical resutls
         if (len(statAccum)==0): return
@@ -1228,6 +1277,91 @@ class NatSimulation:
         print "Hypothesis tests results (total=%d) " % curBlock, hypotheses
         print "Median p-value: ", [np.median(s) for s in pvals]
     
+    def simulationCore(self, natSamples, strategies, nats, stopOnFirstMatch = False):
+        '''
+        Core of simulation algorithm, simulates one round of an algorithm with given strategy, 
+        NAT connection samples and so on...
+        '''
+        
+        # number of iterations to do
+        iters = min(len(natSamples[0]), len(natSamples[1]))
+        
+        mapA  = [{}, {}]                # mapping of the current port to index
+        scanA = [set([]), set([])]      # list of a tuple (assigned port, destination port)
+        portsA = [set([]), set([])]     # set of an allocated ports
+        totalLagA = [0, 0]              # total number of errors during protocol
+        stepMap = [{}, {}]              # maps step to allocated port
+        foundSomething = False
+        for i in range(0, iters):
+            
+            # A scan
+            #dstA  = b[i]#1*i #- stageChange*(stageNumA)/10.0# destination of scan o the other side
+            for party in [0,1]:
+                # Obtain next tuple (source port, destination port) from strategy
+                nextA = strategies[party].next(party, i)
+                dstA  = nextA[1]
+                # Obtain external NAT port by querying NAT for allocation a new connection
+                curA  = nats[party].alloc(party, nextA[0], party ^ 0x1, dstA, i*self.portScanInterval)
+                
+                # Waiting between consecutive scans, compute number of new connections by 
+                # using Poisson process. Now generating new allocations to the new round/step of the protocol.
+                curLag = natSamples[party][i]
+                totalLagA[party] += curLag
+                
+                # Reflect allocations meanwhile to the NAT
+                nats[party].occupy(curLag, i*self.portScanInterval)
+                
+                # Add protocol to the maps.
+                toAdd  = (curA, dstA) if party==0 else (dstA, curA)     # swap pair for other party - in order to find set intersection
+                scanA[party].add(toAdd)
+                portsA[party].add(curA)
+                mapA[party][curA] = i
+                stepMap[party][i] = (curA, dstA)
+                #print "A scan: %d [%03d] --> [%03d] lag=%02d i=%03d toAdd=%s" % (party, curA, dstA, curLag, i, str(toAdd))
+                
+                if stopOnFirstMatch and toAdd in scanA[party ^ 0x1]: 
+                    foundSomething = True
+            if foundSomething: break
+        
+        if not self.compact:
+            print "TotalLags [%02d %02d]" % (totalLagA[0], totalLagA[1])
+        
+        # OK is there any intersection in both sets?
+        res = list(scanA[0].intersection(scanA[1]))
+        # sort by minimum element in tuple
+        res.sort(key=lambda tup: min(tup[0], tup[1]))
+        
+        # ascii match
+        if self.ascii > 1 or (self.ascii==1 and self.simulationRounds==1):
+            self.matchAscii(portsA, scanA, mapA, stepMap, res)
+        
+        # Generate DOT graph
+        if self.dot > 1 or (self.dot==1 and self.simulationRounds==1):
+            self.generateDot(portsA[0], portsA[1], scanA[0], scanA[1], mapA, res)
+        
+        # return tuple
+        ret = (res, portsA, mapA, scanA, totalLagA, stepMap)
+                    
+        # Algorithm failed to establish a new connection
+        if (len(res) == 0): 
+            if not self.compact:
+                print "Algorithm failed, no intersecting points"
+            else:
+                sys.stdout.write('.')
+                sys.stdout.flush()
+                
+        # fail -> nothing to do now
+        if (len(res) == 0): 
+            return ret
+        
+        if not self.compact: 
+            print "RES: ", res, "i=%02d" % mapA[0][res[0][0]], "; j=%02d" % mapA[1][res[0][1]]
+        else:
+            sys.stdout.write('X')
+            sys.stdout.flush()
+            
+        return ret
+        
     def simulation(self, natA, natB, strategy):
         '''
         Simple simulation of NAT traversal algorithm.
@@ -1262,103 +1396,167 @@ class NatSimulation:
             nats[0].occupy(kA, 0)
             nats[1].occupy(kB, 0)
             
-            # assume we are always starting from port 0 on both sides
-            #i = kA + 2*kB
-            #j = kA +   kB
-            #print "Offsets that would match without any further errors i=%02d; j=%02d" % (i, j)
-            
-            # now simulate the protocol, phase with port scanning
-            #targetA = 2 * self.numCon * self.errors
-            #targetB =     self.numCon * self.errors
-            
             # set silent period duration to the strategy
             sData = []
             sData = strategy.silent(curSilentA, curSilentB, self.lmbd)
             
-            mapA  = [{}, {}]                # mapping of the current port to index
-            scanA = [set([]), set([])]      # list of a tuple (assigned port, destination port)
-            portsA = [set([]), set([])]     # set of an allocated ports
-            totalLagA = [0, 0]              # total number of errors during protocol
-            stepMap = [{}, {}]              # maps step to allocated port
-            foundSomething = False
-            for i in range(0, self.errors):
-                
-                # A scan
-                #dstA  = b[i]#1*i #- stageChange*(stageNumA)/10.0# destination of scan o the other side
-                for party in [0,1]:
-                    # Obtain next tuple (source port, destination port) from strategy
-                    nextA = strategy.next(party, i)
-                    dstA  = nextA[1]
-                    # Obtain external NAT port by querying NAT for allocation a new connection
-                    curA  = nats[party].alloc(party, nextA[0], party ^ 0x1, dstA, i*self.portScanInterval)
-                    
-                    # Waiting between consecutive scans, compute number of new connections by 
-                    # using Poisson process. Now generating new allocations to the new round/step of the protocol.
-                    curLag = self.getNumOfNewConnections(self.portScanInterval)
-                    totalLagA[party] += curLag
-                    
-                    # Reflect allocations meanwhile to the NAT
-                    nats[party].occupy(curLag, i*self.portScanInterval)
-                    
-                    # Add protocol to the maps.
-                    toAdd  = (curA, dstA) if party==0 else (dstA, curA)     # swap pair for other party - in order to find set intersection
-                    scanA[party].add(toAdd)
-                    portsA[party].add(curA)
-                    mapA[party][curA] = i
-                    stepMap[party][i] = (curA, dstA)
-                    #print "A scan: %d [%03d] --> [%03d] lag=%02d i=%03d toAdd=%s" % (party, curA, dstA, curLag, i, str(toAdd))
-                    
-                    if stopOnFirstMatch and toAdd in scanA[party ^ 0x1]: 
-                        foundSomething = True
-                if foundSomething: break
-            
-            if not self.compact:
-                print "New connections meanwhile silent period [%02d, %02d]; " % (kA, kB), "start=", sData, "; totalLags [%02d %02d]" % (totalLagA[0], totalLagA[1])
-            
-            # OK is there any intersection in both sets?
-            res = list(scanA[0].intersection(scanA[1]))
-            # sort by minimum element in tuple
-            res.sort(key=lambda tup: min(tup[0], tup[1]))
-            
-            # ascii match
-            if self.ascii > 1 or (self.ascii==1 and self.simulationRounds==1):
-                self.matchAscii(portsA, scanA, mapA, stepMap, res)
-            
-            # Generate DOT graph
-            if self.dot > 1 or (self.dot==1 and self.simulationRounds==1):
-                self.generateDot(portsA[0], portsA[1], scanA[0], scanA[1], mapA, res)
-            
-            if (len(res) == 0): 
-                if not self.compact:
-                    print "Algorithm failed, no intersecting points"
-                else:
-                    sys.stdout.write('.')
-                    sys.stdout.flush()
-                    
-            # Stop early if poor performance
-            if False and sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast:
-                sys.stdout.write('Z')
-                sys.stdout.flush()
-                realRounds = sn+1
-                break
+            # do the simulation round
+            natSamples = [[], []]
+            for i in [0, 1]:
+                natSamples[i] = [int(x) for x in np.random.poisson(self.lmbd*self.portScanInterval, self.errors)] 
+            (res, portsA, mapA, scanA, totalLagA, stepMap) = self.simulationCore(natSamples, [strategy, strategy], nats, stopOnFirstMatch)
             
             # fail -> nothing to do now
             if (len(res) == 0): 
                 continue
             
-            if not self.compact: 
-                print "RES: ", res, "i=%02d" % mapA[0][res[0][0]], "; j=%02d" % mapA[1][res[0][1]]
-            else:
-                sys.stdout.write('X')
-                sys.stdout.flush()
-            
             successCnt += 1.0
             successAcc[0] += mapA[0][res[0][0]]
             successAcc[1] += mapA[1][res[0][1]]
+            
+            # Stop early if poor performance
+            if False and sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast:
+                sys.stdout.write('Z')
+                sys.stdout.flush()
+                realRounds = sn+1
+                break 
         
         simEnd = getTime()
         simTotal = simEnd - simStart    
             
+        # Report results after simulation is done
+        print "\nSuccess count: %02.3f ; cnt=%03d; lmbd=%01.3f; scanInterval=%04d ms; base sleep=%04d; average steps: %04.3f %04.3f; time elapsed=%04.3f s" % \
+            (successCnt / realRounds    if realRounds > 0 else 0, 
+             successCnt, 
+             self.lmbd, 
+             self.portScanInterval, 
+             self.silentPeriodBase,
+             successAcc[0] / successCnt if successCnt > 0 else 0,
+             successAcc[1] / successCnt if successCnt > 0 else 0,
+             simTotal/1000.0)
+        
+        return (successCnt / realRounds    if realRounds > 0 else 0, 
+                successCnt, 
+                successAcc[0] / successCnt if successCnt > 0 else 0,
+                successAcc[1] / successCnt if successCnt > 0 else 0,)
+    
+    def nfSimulation(self, natA, natB, strategyA, strategyB, filename=None, processedNfdump=None, homeNet='', filt=None):
+        '''
+        Simulating NAT for traversal algorithms with netflow data as network load.
+        '''
+        #
+        # Run NFdump and read line by line
+        #
+        activeTimeout = 300*1000 # active timeout = time after a long lived flow is ended and written to a netflow file
+        sampleSize = 950
+        sampleSkip = 0
+        curTestSize=0
+        sn=0
+        maxBlock=100
+        statAccum=[]
+        
+        T = self.portScanInterval   # port scan interval for nfdump generator, strategies, ... 
+        lambdaSamples = 20          # how many NAT samples are taken to measure lambda...
+        
+        # simulation variables
+        strategies = [strategyA, strategyB]
+        nats = [natA, natB]
+        successCnt = 0.0
+        stopOnFirstMatch = self.simulationRounds != 1
+        getTime = lambda: int(round(time.time() * 1000))
+        simStart = getTime()
+        successAcc = [0,0]              # accumulator for steps needed to connect if successfully
+        realRounds = self.simulationRounds
+        
+        # Prepare nfdump record generator.
+        nfdumpObj       = None
+        nfdumpGenerator = None
+        if processedNfdump!=None:
+            nfdumpObj = NfdumpReader(processedNfdump)
+            nfdumpGenerator = nfdumpObj.generator()
+        else:
+            nfdumpObj = NfdumpSorter(filename, filt, activeTimeout)
+            nfdumpGenerator = nfdumpObj.generator()
+        
+        # generates samples of NAT process w.r.t. new connections.
+        nfgen = self.nfdumpSampleGenerator(natA, nfdumpGenerator, homeNet, T, 
+                                           sampleSize, sampleSkip, 0, maxBlock, activeTimeout)
+        
+        while True:
+            # sample NAT connections from Nfdump files
+            natSamples = [[], []]
+            try:
+                natSamples[0] = next(nfgen)
+                natSamples[1] = next(nfgen)
+            except Exception:
+                break
+            
+            sn += 1
+            
+            # reset NATs
+            nats[0].reset()
+            nats[1].reset()
+            strategyA.reset(nats, self)
+            strategyB.reset(nats, self)
+            
+            #
+            # Measure lambda by using some nat samples for it.
+            # lmbd[0] = lambda for A network, thus interesting for B
+            #
+            lmbd = [ (sum(natSamples[party][0:lambdaSamples]) / float(lambdaSamples * T)) for party in [0,1] ]
+            natSamples[0] = natSamples[0][lambdaSamples:]
+            natSamples[1] = natSamples[1][lambdaSamples:]
+            
+            # generate silent period time, convert to NAT samples
+            curSilentA = (self.silentPeriodBase + self.poisson(self.silentPeriodlmbd, 1)) / float(T)
+            curSilentB = (self.silentPeriodBase + self.poisson(self.silentPeriodlmbd, 1)) / float(T) 
+            
+            # Generate new connections for silent period on both sides. For whole time frames use 
+            # NAT sample, for partial generate appropriate part according to lambda measurement...
+            kA = sum(natSamples[0][0:int(math.floor(curSilentA))]) + self.poisson(lmbd[0], int(T*(curSilentA - math.floor(curSilentA))))
+            kB = sum(natSamples[1][0:int(math.floor(curSilentB))]) + self.poisson(lmbd[1], int(T*(curSilentB - math.floor(curSilentB))))
+            
+            # reflect errors to NAT allocation - take ports from silent period
+            nats[0].occupy(kA, 0)
+            nats[1].occupy(kB, 0)
+            
+            # strip silent period
+            natSamples[0] = natSamples[0][int(math.floor(curSilentA)):]
+            natSamples[1] = natSamples[1][int(math.floor(curSilentB)):]
+            
+            # set silent period duration to the strategy
+            strategyA.silent(int(curSilentB*T*1.5), 0, lmbd[1])
+            strategyB.silent(0,                 int(curSilentA*T*1.5), lmbd[0])
+            
+            if not self.compact:
+                print "\n##%03d. Current silent period time: [%03.3f, %03.3f]~[%04d, %04d]; lmbd estimates[%03.3f, %03.3f] TestimateFor[%03.3f, %03.3f] len [%d, %d]" \
+                    % (sn, curSilentA*T, curSilentB*T, kA, kB, lmbd[0], lmbd[1], strategyA.startPos[0], strategyB.startPos[1], len(natSamples[0]), len(natSamples[1]))
+            
+            # do the simulation round 
+            (res, portsA, mapA, scanA, totalLagA, stepMap) = self.simulationCore(natSamples, strategies, nats, stopOnFirstMatch)
+            
+            # fail -> nothing to do now
+            if (len(res) == 0): 
+                continue
+            
+            successCnt += 1.0
+            successAcc[0] += mapA[0][res[0][0]]
+            successAcc[1] += mapA[1][res[0][1]]
+            
+            # Stop early if poor performance
+            if False and sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast:
+                sys.stdout.write('Z')
+                sys.stdout.flush()
+                realRounds = sn+1
+                break 
+        
+        simEnd = getTime()
+        simTotal = simEnd - simStart    
+        realRounds = sn
+    
+        # force generator de-initialization
+        nfdumpObj.deinit()
+
         # Report results after simulation is done
         print "\nSuccess count: %02.3f ; cnt=%03d; lmbd=%01.3f; scanInterval=%04d ms; base sleep=%04d; average steps: %04.3f %04.3f; time elapsed=%04.3f s" % \
             (successCnt / realRounds    if realRounds > 0 else 0, 
@@ -1664,7 +1862,7 @@ class NatSimulation:
         
         For instance port 6 can be reached by 2,2,2 or 3,3. 
         '''
-        iterations = 50000
+        iterations = 5000
         
         isteps  = set(isteps)
         maxStep = max(isteps) if len(isteps) > 0 else 1000
@@ -1752,23 +1950,11 @@ class NatSimulation:
         # Histogram & statistics for whole process
         #self.histAndStatisticsPortDistrib(portDistrib, iterations, ports, 'distrib/total_%s_%03d.pdf' % (lmbdStr, t))
     
-        ns = []
-        ps = []
-    
         # Histogram & statistics for particular interesting ports
         for step in portDistribSteps:
             print "\n", "="*80
             print "Step %03d" % step
-            
-            res = self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step), drawHist=True, step=step)
-            ns.append(res['n'])
-            ps.append(res['p'])
-        
-        # write binomial distributions as pythonic arrays
-        #nsString = [('%6.9f' % i) for i in ns]
-        #psString = [('%6.9f' % i) for i in ps]
-        #print "ns = [", ", ".join(nsString), "]"
-        #print "ps = [", ", ".join(psString), "]"
+            self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step), drawHist=True, step=step)
     
     def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None, drawHist=False, step=-1):
         '''
@@ -1792,7 +1978,7 @@ class NatSimulation:
         if step!=-1:
             (chi2, pval2, m2) = self.goodMatchPoisson(ex-step, portDistrib, ports, iterations, shift=int(step * (-1)))
             print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-                (('%04.4f' % ex-step).zfill(8), ('%04.4f' % chi2).zfill(10), pval2, "is REJECTED" if pval2 < 0.05 else "holds      ", self.pearsonCorelation(m2, portDistrib))#
+                (('%04.4f' % (ex-step)).zfill(8), ('%04.4f' % chi2).zfill(10), pval2, "is REJECTED" if pval2 < 0.05 else "holds      ", self.pearsonCorelation(m2, portDistrib))#
         
         (chi1, pval1, m1) = self.goodMatchPoisson(ex, portDistrib, ports, iterations, shift=0)
         print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
@@ -2100,18 +2286,24 @@ class NatSimulation:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='NAT simulator.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-o','--output',help='Output file name from finder', required=False, default='graph.txt')
-    parser.add_argument('-t','--space',help='Time in ms to wait between packet send', required=False, default=10, type=int)
+    parser.add_argument('-o','--output',    help='Output file name from finder', required=False, default='graph.txt')
+    parser.add_argument('-t','--space',     help='Time in ms to wait between packet send', required=False, default=10, type=int)
     parser.add_argument('-l','--lmbd_start',help='On which lambda to start', required=False, default=-1, type=float)
-    parser.add_argument('-s','--strategy',help='Strategy to use (poisson, i2j, fibo, their, ij, binom, simple)', required=False, default='poisson')
-    parser.add_argument('-r','--rounds',help='Simulation rounds', required=False, type=int, default=1000)
-    parser.add_argument('-e','--errors',help='Maximum steps by algorithm', required=False, type=int, default=1000)
-    parser.add_argument('-d','--dot',help='Graphviz dot illustration', required=False, type=int, default=0)
-    parser.add_argument('-a','--ascii',help='Ascii illustration', required=False, type=int, default=0)
-    parser.add_argument('-n','--nfdump',help='NFdump file', required=False, default=None)
+    parser.add_argument('-s','--strategy',  help='Strategy to use (poisson, i2j, fibo, their, ij, binom, simple)', required=False, default='poisson')
+    parser.add_argument('-r','--rounds',    help='Simulation rounds', required=False, type=int, default=1000)
+    parser.add_argument('-e','--errors',    help='Maximum steps by algorithm', required=False, type=int, default=1000)
+    parser.add_argument('-d','--dot',       help='Graphviz dot illustration', required=False, type=int, default=0)
+    parser.add_argument('-a','--ascii',     help='Ascii illustration', required=False, type=int, default=0)
+    parser.add_argument('-n','--nfdump',    help='NFdump file', required=False, default=None)
     parser.add_argument('-m','--nfdump_sorted',help='NFdump sorted file', required=False, default=None)
-    parser.add_argument('-f','--filter',help='NFdump filter', required=False, default=None)
-    parser.add_argument('-g','--hostnet',help='NFdump host address', required=False, default="0.0.0.0")
+    parser.add_argument('-f','--filter',    help='NFdump filter', required=False, default=None)
+    parser.add_argument('-g','--hostnet',   help='NFdump host address', required=False, default="0.0.0.0")
+    parser.add_argument('--lmbd',           help='Default Poisson lambda for simulations', required=False, type=float, default=0.1)
+    parser.add_argument('--pdistrib',       help='Switch to compute port distribution function', required=False, default=False, action='store_true')
+    parser.add_argument('--nfdistrib',      help='Switch to compute netflow port distribution function', required=False, default=False, action='store_true')
+    parser.add_argument('--sim',            help='Starts traversal algorithm simulation', required=False, default=False, action='store_true')
+    parser.add_argument('--nfsim',          help='Starts traversal algorithm simulation with netflow data', required=False, default=False, action='store_true')
+    parser.add_argument('--benchmark',      help='Algorithm benchmarking for graphs', required=False, default=False, action='store_true')
     args = parser.parse_args()
     
     ns = NatSimulation()
@@ -2132,85 +2324,91 @@ if __name__ == "__main__":
 #    print ns.getLambdaExhaustionCDF(natA, 0.999)
 #    sys.exit()
     
-    if args.strategy == 'i2j':
-        print "I2J Strategy: "
-        strategy = I2JStragegy()
-    elif args.strategy == 'ij':
-        print "IJ strategy"
-        strategy = IJStragegy()
-    elif args.strategy == 'fibo':
-        print "Fibonacci strategy"
-        strategy = FiboStrategy()
-    elif args.strategy == 'their':
-        print "Their strategy"
-        strategy = TheirStragegy()
-    elif args.strategy == 'poisson':
-        print "Poisson strategy"    
-        strategy  = PoissonStrategy()
-    elif args.strategy == 'binom':
-        print "Binomial strategy"    
-        strategy  = BinomialStrategy()
-    elif args.strategy == 'simple':
-        print "Simple strategy"    
-        strategy  = SimpleStrategy()
-    strategy.init(None)
+    strategies=[getStrategy(args.strategy), getStrategy(args.strategy)]
+    strategies[0].init(None)
+    strategies[1].init(None)
     
     #strategy.dupl = True
     #strategy.coef = 1.8
-    ns.lmbd = 0.1
+    # Their
+    #strategy.delta = [200, 200]
+    
+    ns.lmbd = args.lmbd
     ns.dot = args.dot
     ns.ascii = args.ascii
     ns.simulationRounds = args.rounds
     ns.errors = args.errors
     ns.portScanInterval = args.space
-    ns.silentPeriodBase=0
-    ns.silentPeriodlmbd=0
+    ns.silentPeriodBase=1000
+    ns.silentPeriodlmbd=100
     
-    # NFdump simulation from dump file 
-    if args.nfdump != None:
-        ns.nfdumpSimulation(natA, filename=args.nfdump, homeNet=args.hostnet, filt=args.filter)
-        sys.exit(0)
-    if args.nfdump_sorted != None:
-        ns.nfdumpSimulation(natA, processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter)
-        sys.exit(0)
+    #
+    # NFdump
+    # Computes port distribution function based on netflow network data.
+    # 
+    if args.nfdistrib:
+        if args.nfdump != None:
+            ns.nfdumpDistribution(natA, filename=args.nfdump, homeNet=args.hostnet, filt=args.filter)
+        if args.nfdump_sorted != None:
+            ns.nfdumpDistribution(natA, processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter)
     
-    #ns.simulation(natA, natB, strategy)
-    #sys.exit(3)
-    
-    # Their
-    #strategy.delta = [200, 200]
-    ns.portDistributionFunction(0.1, 20, range(1,180), [])
-    print "Port distribution done..."
-    sys.exit(3)
-    
-    # generating graph for moving lambda
-    f = open(args.output, 'a+')
-    ns.portScanInterval = args.space
-    
-    f.write("New start at %s; scanInterval=%d; strategy=%s\n" % (time.time(), ns.portScanInterval, args.strategy))
-    print "Scanning port interval: %d" % ns.portScanInterval
-    
-    lmbdArr = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, \
-               0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, \
-               0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, \
-               0.2, 0.21, 0.22, 0.23, 0.24, 0.25]
-    for clmb in lmbdArr:
-        print "# Current lambda: %03.4f" % clmb
-        if args.lmbd_start!=-1 and clmb < args.lmbd_start: continue
+    #
+    # Simple algorithm simulation on a random sample of NAT data.
+    #
+    if args.sim:
+        ns.simulation(natA, natB, strategies[0])
         
-        ns.lmbd = clmb
-        try:
-            if args.strategy == 'poisson':
-                res = ns.coefFinder(natA, natB, strategy, 0.10, 0.1)
-                f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[1])) # python will convert \n to os.linesep
-            else:
-                res = ns.simulation(natA, natB, strategy)
-                f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[2])) # python will convert \n to os.linesep
-            f.flush()
-        except Exception, e:
-            print "Exception!", e
-    f.close()
-    #ns.simulateThem()
+    #
+    # NFdump
+    # Simple algorithm simulation on a random sample of NAT data.
+    #
+    if args.nfsim:
+        ns.compact = False
+        if args.nfdump != None:
+            ns.nfSimulation(natA, natB, strategies[0], strategies[1], filename=args.nfdump, homeNet=args.hostnet, filt=args.filter)
+        if args.nfdump_sorted != None:
+            ns.nfSimulation(natA, natB, strategies[0], strategies[1], processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter)
+    
+    #
+    # Computes port distribution function for given NAT and parameters.
+    #
+    if args.pdistrib:
+        ns.portDistributionFunction(args.lmbd, args.space, range(1,180), [])
+        print "Port distribution done..."
+    
+    #
+    # Algorithm benchmarking on different lambda to test performance in different environment.
+    #
+    if args.benchmark:
+        # generating graph for moving lambda
+        f = open(args.output, 'a+')
+        ns.portScanInterval = args.space
+        
+        f.write("New start at %s; scanInterval=%d; strategy=%s\n" % (time.time(), ns.portScanInterval, args.strategy))
+        print "Scanning port interval: %d" % ns.portScanInterval
+        
+        lmbdArr = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, \
+                   0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, \
+                   0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, \
+                   0.2, 0.21, 0.22, 0.23, 0.24, 0.25]
+        for clmb in lmbdArr:
+            print "# Current lambda: %03.4f" % clmb
+            if args.lmbd_start!=-1 and clmb < args.lmbd_start: continue
+            
+            ns.lmbd = clmb
+            try:
+                if args.strategy == 'poisson':
+                    res = ns.coefFinder(natA, natB, strategies[0], 0.10, 0.1)
+                    f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[1])) # python will convert \n to os.linesep
+                else:
+                    res = ns.simulation(natA, natB, strategies[0])
+                    f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[2])) # python will convert \n to os.linesep
+                f.flush()
+            except Exception, e:
+                print "Exception!", e
+        f.close()
+        #ns.simulateThem()
+    pass
     
 
         
