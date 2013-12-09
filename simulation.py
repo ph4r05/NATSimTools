@@ -578,6 +578,194 @@ class PoissonStrategy(Strategy):
         #self.startPos[party] += 1+NatSimulation.poisson(self.lmbd, 10)#*(1+step*0.77))
         #return (0, int(self.startPos[party]))
 
+def nfline2tuple(line):
+    '''
+    Translates nfdump line of a format "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" to a tuple defined by the format
+    '''
+    tpl = [str(x).strip() for x in line.split(";")]
+    tstart = tpl[0]
+    tdur   = float(tpl[1])
+    
+    dtime = dparser.parse(tstart)           # Parse time from nfdump to datetime format
+    startUtc = NatSimulation.dtimeToUtc(dtime)            # convert date time string to UTC
+    lastData = int(startUtc + round(tdur)) 
+    tpl.append(startUtc)
+    tpl.append(lastData)
+    
+    return (tpl, startUtc) 
+
+class NfdumpAbstract:
+    def deinit(self):
+        pass
+    def generator(self):
+        pass
+
+class NfdumpSorter(NfdumpAbstract):
+    '''
+    Generator for reading a nfdump file by nfdump program, sorted by time of netflow 
+    start - sorting on the fly by heap algorithm.
+    '''
+    proc = None
+    once = False
+    tout = 300*1000
+    def __init__(self, filename, filt=None, activeTimeout=300*1000):
+        '''
+        Initializes object for nfdumpSortedGenerator - creates a nfdump process 
+        '''
+        if self.once == True: raise Exception('Generator was not de-initialized, may be still running...')
+        
+        cmdLine = 'nfdump -q -r "%s" -o "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" "%s"' % (filename, filt if filt!=None else "")
+        print "nfdump command line used: %s" % cmdLine
+        
+        self.once = True
+        self.tout = activeTimeout
+        self.proc = subprocess.Popen(cmdLine, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+        print "Data loaded, going to process output..."
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self):
+        self.deinit()
+    
+    def deinit(self):
+        '''
+        Kills subprocess if still exists
+        '''
+        if self.proc!=None:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+            pass
+            self.proc = None
+            self.once = False
+        pass
+    
+    def generator(self):
+        '''
+        Generator object producing nfdump lines for a given filename for nfdump file. 
+        Records are sorted by first seen time in this generator since nfdump records does not have to be sorted by default.
+        (Probe stored records by its internal logic)
+        
+        Using heap to sort by maintaining some amount of records in memory in priority queue 
+        and taking minimal element if have enough elements and sufficient precision. 
+        '''    
+        if self.once == False: raise Exception('Generator is not initialized...')
+        
+        cnt = 0
+        isDead = False       # is producing program dead?
+        buff   = []
+        while(True):         # while there is something to run
+            cnt += 1
+            retcode = self.proc.poll() #returns None while subprocess is running
+            line = self.proc.stdout.readline()
+            
+            # Flag determines whether queue sort is consistent with absolute sort w.r.t. whole data set.  
+            isSorted = False
+            # Flag determines whether there was some line added to the queue => new event read.
+            lineAdded = False
+            
+            # Parse output format to tuple.
+            # Partial sort by heap.
+            #
+            # Read line if there is something to read and process didn't finish
+            # in previous round.
+            if line!=None and len(line)>0 and isDead==False:
+                tpl, startUtc = nfline2tuple(line)
+                
+                # Add record to the priority queue sorted by first seen time
+                heappush(buff, (startUtc, tpl))
+                lineAdded = True
+                
+                # If time difference between current element and minimal one in queue is 
+                # greater than active timeout, we have probably enough data in queue
+                # to be completely sorted w.r.t. whole data set since the biggest gap 
+                # in nearly-sorted block is of size active timeout (probe added flow to file
+                # when active timeout was expired). The next entry cannot be smaller. 
+                # Just to be sure - require at least 10 000 elements in priority queue.
+                if (startUtc - buff[0][0]) > self.tout and len(buff) >= 10000:
+                    isSorted=True 
+                    #print "Sorted event... cnt=%d, min=%s, curr=%s, diff=%s" % (cnt, buff[0][0], startUtc, (startUtc - buff[0][0]))
+
+            # If program is dead skip the line parsing in the next iteration and set data 
+            # in the priority queue as prepared to be processed.
+            if retcode is not None: 
+                isDead=True
+                isSorted=True
+
+            # If line was added and queue is not ready, then continue (still can read some data,
+            # program is still running, so wait to fill the queue)
+            if lineAdded and not isSorted and retcode is None: 
+                if (cnt % 1000) == 0: 
+                    sys.stdout.write('.')
+                    sys.stdout.flush()
+                continue
+            
+            # If there is nothing to process then we are done...
+            if len(buff)==0:
+                break
+            
+            tplpopped = heappop(buff)
+            yield tplpopped
+        
+        # End of the input processing
+        self.deinit()
+
+class NfdumpReader(NfdumpAbstract):
+    '''
+    Generator for reading pre-processed NFdump file.
+    
+    Nfdump generator reads already sorted records in format "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp"
+    Just reads the file and parses nfdump format to tuple.
+    '''
+    fo   = None
+    once = False
+    def __init__(self, filename):
+        '''
+        Initializes object for generator - opens nfdump file for reading 
+        '''
+        if self.once == True: raise Exception('Generator was not de-initialized, may be still running...')
+        self.fo   = open(filename, "r+")
+        self.once = True
+        print "Data loaded, going to process output..."
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self):
+        self.deinit()
+    
+    def deinit(self):
+        '''
+        Kills subprocess if still exists
+        '''
+        if self.fo!=None:
+            try:
+                self.fo.close()
+            except Exception:
+                pass
+            pass
+            self.fo   = None
+            self.once = False
+        pass
+    
+    def generator(self):
+        '''
+        Nfdump generator reads already sorted records in format "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp"
+        Just reads the file and parses nfdump format to tuple.
+        ''' 
+        if self.once == False: raise Exception('Generator is not initialized...')
+        
+        while True:
+            line = self.fo.readline()
+            if not line:
+                break
+            tpl, startUtc = nfline2tuple(line)
+            yield (startUtc, tpl)
+            
+        self.deinit()
+
 class NatSimulation:
     
     # Lambda for Poisson process generator. Time unit = 1 ms
@@ -821,111 +1009,30 @@ class NatSimulation:
         Converts datetime to unix time stamp
         '''
         return int((calendar.timegm(dtime.utctimetuple()) * 1000) + (dtime.microsecond/1000))
-    
+       
     @staticmethod
     def nfline2tuple(line):
         '''
         Translates nfdump line of a format "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" to a tuple defined by the format
         '''
-        tpl = [str(x).strip() for x in line.split(";")]
-        tstart = tpl[0]
-        tdur   = float(tpl[1])
-        
-        dtime = dparser.parse(tstart)           # Parse time from nfdump to datetime format
-        startUtc = NatSimulation.dtimeToUtc(dtime)            # convert date time string to UTC
-        lastData = int(startUtc + round(tdur)) 
-        tpl.append(startUtc)
-        tpl.append(lastData)
-        
-        return (tpl, startUtc) 
-    
-    def nfdumpReaderGenerator(self, fo):
+        return nfline2tuple(line) 
+       
+    def nfdumpSampleGenerator(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, 
+                              T=10, sampleSize=1000, sampleStartSkip=5000, sampleEachSkip=0, maxBlockSize=-1):
         '''
-        nfdump generator reads already sorted records in format "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp"
-        Just reads the file and parses nfdump format to tuple.
+        Simulates network traffic using provided nfdump file and simulates NAT. 
+        Generate sequence of a new conenctions allocated, sampling each T milliseconds.
+        
+        T                 = milliseconds sampling time, each sample is done after 
+        sampleSize        = number of samples
+        sampleStartSkip   = number of records to skip from the beginning of the file
+        sampleEachSkip    = number of records
+        maxBlockSize      = number of blocks to process (1 block = sampleSize samples)
         '''
-        while True:
-            line = fo.readline()
-            if not line:
-                break
-            tpl, startUtc = self.nfline2tuple(line)
-            yield (startUtc, tpl)
         
-    def nfdumpSortedGenerator(self, filename, filt=None, activeTimeout=300*1000):
-        '''
-        Generator object producing nfdump lines for a given filename for nfdump file. 
-        Records are sorted by first seen time in this generator since nfdump records does not have to be sorted by default.
-        (Probe stored records by its internal logic)
         
-        Using heap to sort by maintaining some amount of records in memory in priority queue 
-        and taking minimal element if have enough elements and sufficient precision. 
-        '''    
-        cnt = 0
-        cmdLine = 'nfdump -q -r "%s" -o "fmt:%%ts;%%td;%%pr;%%sa;%%sp;%%da;%%dp" "%s"' % (filename, filt if filt!=None else "")
-        print "nfdump command line used: %s" % cmdLine
         
-        self.proc = subprocess.Popen(cmdLine, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
-        print "Data loaded, going to process output..."
         
-        isDead = False       # is producing program dead?
-        buff   = []
-        while(True):         # while there is something to run
-            cnt += 1
-            retcode = self.proc.poll() #returns None while subprocess is running
-            line = self.proc.stdout.readline()
-            
-            # Flag determines whether queue sort is consistent with absolute sort w.r.t. whole data set.  
-            isSorted = False
-            # Flag determines whether there was some line added to the queue => new event read.
-            lineAdded = False
-            
-            # Parse output format to tuple.
-            # Partial sort by heap.
-            #
-            # Read line if there is something to read and process didn't finish
-            # in previous round.
-            if line!=None and len(line)>0 and isDead==False:
-                tpl, startUtc = self.nfline2tuple(line)
-                
-                # Add record to the priority queue sorted by first seen time
-                heappush(buff, (startUtc, tpl))
-                lineAdded = True
-                
-                # If time difference between current element and minimal one in queue is 
-                # greater than active timeout, we have probably enough data in queue
-                # to be completely sorted w.r.t. whole data set since the biggest gap 
-                # in nearly-sorted block is of size active timeout (probe added flow to file
-                # when active timeout was expired). The next entry cannot be smaller. 
-                # Just to be sure - require at least 10 000 elements in priority queue.
-                if (startUtc - buff[0][0]) > activeTimeout and len(buff) >= 10000:
-                    isSorted=True 
-                    #print "Sorted event... cnt=%d, min=%s, curr=%s, diff=%s" % (cnt, buff[0][0], startUtc, (startUtc - buff[0][0]))
-
-            # If program is dead skip the line parsing in the next iteration and set data 
-            # in the priority queue as prepared to be processed.
-            if retcode is not None: 
-                isDead=True
-                isSorted=True
-
-            # If line was added and queue is not ready, then continue (still can read some data,
-            # program is still running, so wait to fill the queue)
-            if lineAdded and not isSorted and retcode is None: 
-                if (cnt % 1000) == 0: 
-                    sys.stdout.write('.')
-                    sys.stdout.flush()
-                continue
-            
-            # If there is nothing to process then we are done...
-            if len(buff)==0:
-                break
-            
-            tplpopped = heappop(buff)
-            yield tplpopped
-        try:
-            self.proc.kill()
-            self.proc = None
-        except Exception,e:
-            pass
         pass
     
     def nfdumpSimulation(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None):
@@ -945,7 +1052,7 @@ class NatSimulation:
         lastFree = natA.poolLen
         samplesRes = []         # sampling new connections (curr port - last port)
         samplePort = []         # sampling port numbers - whole process
-        sampleSize = 300
+        sampleSize = 100
         sampleSkip = 5000
         curTestSize=0
         curBlock=0
@@ -954,13 +1061,14 @@ class NatSimulation:
         fileDesc = 't%04d_s%05d_sk%05d' % (self.portScanInterval, sampleSize, sampleSkip)
         
         # Prepare nfdump record generator.
+        nfdumpObj       = None
         nfdumpGenerator = None
-        fileObject = None
         if processedNfdump!=None:
-            fileObject = open(processedNfdump, "r+")
-            nfdumpGenerator = self.nfdumpReaderGenerator(fileObject)
+            nfdumpObj = NfdumpReader(processedNfdump)
+            nfdumpGenerator = nfdumpObj.generator()
         else:
-            nfdumpGenerator = self.nfdumpSortedGenerator(filename, filt, activeTimeout)
+            nfdumpObj = NfdumpSorter(filename, filt, activeTimeout)
+            nfdumpGenerator = nfdumpObj.generator()
         
         # iterate over lines
         for tplpopped in nfdumpGenerator:
@@ -1074,7 +1182,7 @@ class NatSimulation:
                 (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
             
             print "\nBlock=%04d, Distribution: " % curBlock, distrib 
-            sres = self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=True)
+            sres = self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=False)
             statAccum.append(sres['distrib'])
             
             print "=" * 180
@@ -1090,19 +1198,8 @@ class NatSimulation:
             curBlock+=1
             if curBlock >= maxBlock: break
         
-        # kill subprocess if exists
-        if self.proc!=None:
-            try:
-                self.proc.kill()
-            except Exception, e:
-                pass
-            
-        # close file if exists
-        if fileObject != None:
-            try:
-                fileObject.close()
-            except Exception, e:
-                pass
+        # force generator de-initialization
+        nfdumpGenerator.deinit()
         
         # evalueate statistical resutls
         if (len(statAccum)==0): return
@@ -1115,7 +1212,6 @@ class NatSimulation:
         
         print "Hypothesis tests results (total=%d) " % curBlock, hypotheses
         print "Median p-value: ", [np.median(s) for s in pvals]
-        
     
     def simulation(self, natA, natB, strategy):
         '''
