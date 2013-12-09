@@ -1017,34 +1017,24 @@ class NatSimulation:
         '''
         return nfline2tuple(line) 
        
-    def nfdumpSampleGenerator(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, 
-                              T=10, sampleSize=1000, sampleStartSkip=5000, sampleEachSkip=0, maxBlockSize=-1):
+    def nfdumpSampleGenerator(self, natA, nfgen, homeNet='147.250.',
+                              T=10, sampleSize=1000, recStartSkip=5000, sampleEachSkip=0, maxBlockSize=-1, activeTimeout = 300*1000):
         '''
         Simulates network traffic using provided nfdump file and simulates NAT. 
         Generate sequence of a new conenctions allocated, sampling each T milliseconds.
         
+        natA              = nat where to perform connection requests, can be reseted multiple times 
+                            in this method. This instance should be dedicated just for this method. 
         T                 = milliseconds sampling time, each sample is done after 
         sampleSize        = number of samples
-        sampleStartSkip   = number of records to skip from the beginning of the file
+        recStartSkip      = number of records to skip from the beginning of the file
         sampleEachSkip    = number of records
         maxBlockSize      = number of blocks to process (1 block = sampleSize samples)
         '''
-        
-        
-        
-        
-        pass
-    
-    def nfdumpSimulation(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None):
-        '''
-        Reads nfdump file with given filter and simulates NAT
-        '''
-        
         #
         # Run NFdump and read line by line
         #
         cnt = 0
-        activeTimeout = 300*1000 # active timeout = time after a long lived flow is ended and written to a netflow file
 
         lastSampleTime = 0
         lastSamplePort = 0
@@ -1052,26 +1042,11 @@ class NatSimulation:
         lastFree = natA.poolLen
         samplesRes = []         # sampling new connections (curr port - last port)
         samplePort = []         # sampling port numbers - whole process
-        sampleSize = 100
-        sampleSkip = 5000
         curTestSize=0
         curBlock=0
-        maxBlock=100
-        statAccum=[]
-        fileDesc = 't%04d_s%05d_sk%05d' % (self.portScanInterval, sampleSize, sampleSkip)
-        
-        # Prepare nfdump record generator.
-        nfdumpObj       = None
-        nfdumpGenerator = None
-        if processedNfdump!=None:
-            nfdumpObj = NfdumpReader(processedNfdump)
-            nfdumpGenerator = nfdumpObj.generator()
-        else:
-            nfdumpObj = NfdumpSorter(filename, filt, activeTimeout)
-            nfdumpGenerator = nfdumpObj.generator()
         
         # iterate over lines
-        for tplpopped in nfdumpGenerator:
+        for tplpopped in nfgen:
             cnt += 1
             if tplpopped == None or tplpopped[1] == None \
                 or tplpopped[1][0] == None or tplpopped[1][1] == None or tplpopped[1][2] == None \
@@ -1079,12 +1054,8 @@ class NatSimulation:
                 or tplpopped[1][6] == None or tplpopped[1][7] == None or tplpopped[1][8] == None:
                 continue
             
-            # If loop already started inform user.
-            if cnt == 1:
-                print "Starting with analysis..."
-            
             # Sample skip - beginning of the file may be non-ideal (already opened connections, ...)
-            if cnt < sampleSkip:
+            if cnt < recStartSkip:
                 if (cnt % 10000) == 0: 
                     sys.stdout.write('s')
                     sys.stdout.flush()
@@ -1095,7 +1066,7 @@ class NatSimulation:
             
             #print tplpopped[1], fromHome
             # sample NAT state each X time units
-            if (startUtc/(self.portScanInterval) > lastSampleTime):
+            if (startUtc/(T) > lastSampleTime):
                 # Get next port that would be allocated in this time
                 lastPort = natA.peekNext(startUtc)
                 # How many connections were made since last sample?
@@ -1103,7 +1074,7 @@ class NatSimulation:
                 # Initialize observation start if not start
                 if lastStart==-1: lastStart  = 0
                 else:             
-                    newTimeBlocks = startUtc/(self.portScanInterval) - lastSampleTime
+                    newTimeBlocks = startUtc/(T) - lastSampleTime
                     if newTimeBlocks>1: # has to fill gaps where no event happened -> 0
                         for tmpi in range(lastStart,lastStart+newTimeBlocks-1):
                             #sys.stdout.write('g')
@@ -1118,10 +1089,10 @@ class NatSimulation:
                 samplePort.append(lastPort)
                 
                 lastSamplePort = lastPort
-                lastSampleTime = startUtc/(self.portScanInterval)
+                lastSampleTime = startUtc/(T)
                 #if len(samplesRes) >= sampleSize: break
                 
-                # colelcted samples
+                # collected samples
                 curTestSize+=1
             pass
             
@@ -1143,8 +1114,58 @@ class NatSimulation:
             if curTestSize<sampleSize: 
                 continue
             
+            yield samplesRes
+            
+            # State reset for next iteration
+            curTestSize = 0
+            lastSampleTime = 0
+            lastSamplePort = 0
+            lastStart = -1
+            lastFree = natA.poolLen
+            samplesRes = []
+            natA.reset()
+            curBlock+=1
+            
+            if curBlock >= maxBlockSize: break        
+        pass
+    
+    def nfdumpSimulation(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None):
+        '''
+        Reads nfdump file with given filter and simulates NAT
+        '''
+        
+        #
+        # Run NFdump and read line by line
+        #
+        activeTimeout = 300*1000 # active timeout = time after a long lived flow is ended and written to a netflow file
+        samplesRes = []         # sampling new connections (curr port - last port)
+        sampleSize = 100
+        sampleSkip = 5000
+        curTestSize=0
+        curBlock=0
+        maxBlock=100
+        statAccum=[]
+        fileDesc = 't%04d_s%05d_sk%05d' % (self.portScanInterval, sampleSize, sampleSkip)
+        
+        # Prepare nfdump record generator.
+        nfdumpObj       = None
+        nfdumpGenerator = None
+        if processedNfdump!=None:
+            nfdumpObj = NfdumpReader(processedNfdump)
+            nfdumpGenerator = nfdumpObj.generator()
+        else:
+            nfdumpObj = NfdumpSorter(filename, filt, activeTimeout)
+            nfdumpGenerator = nfdumpObj.generator()
+        
+        # generates samples of NAT process w.r.t. new connections.
+        nfgen = self.nfdumpSampleGenerator(natA, nfdumpGenerator, homeNet, self.portScanInterval, 
+                                           sampleSize, sampleSkip, 0, maxBlock, activeTimeout)
+        
+        # iterate over new connection count samples
+        for samplesRes in nfgen:
             # Process & analyze data
             maxE = max(samplesRes)+1
+            
             # Convert list of port numbers in each sample to frequency distribution
             distrib = [0] * (maxE)
             sampleSizeR=len(samplesRes)
@@ -1189,12 +1210,6 @@ class NatSimulation:
             
             # State reset for next iteration
             curTestSize = 0
-            lastSampleTime = 0
-            lastSamplePort = 0
-            lastStart = -1
-            lastFree = natA.poolLen
-            samplesRes = []
-            natA.reset()
             curBlock+=1
             if curBlock >= maxBlock: break
         
