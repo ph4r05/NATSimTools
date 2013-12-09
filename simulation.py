@@ -943,11 +943,14 @@ class NatSimulation:
         lastSamplePort = 0
         lastStart = -1
         lastFree = natA.poolLen
-        samplesRes = []
-        sampleSize = 500
+        samplesRes = []         # sampling new connections (curr port - last port)
+        samplePort = []         # sampling port numbers - whole process
+        sampleSize = 300
         sampleSkip = 5000
         curTestSize=0
         curBlock=0
+        maxBlock=100
+        statAccum=[]
         fileDesc = 't%04d_s%05d_sk%05d' % (self.portScanInterval, sampleSize, sampleSkip)
         
         # Prepare nfdump record generator.
@@ -1004,6 +1007,7 @@ class NatSimulation:
                 #sys.stdout.write('x')
                 #sys.stdout.flush()
                 samplesRes.append(curSampleConn)
+                samplePort.append(lastPort)
                 
                 lastSamplePort = lastPort
                 lastSampleTime = startUtc/(self.portScanInterval)
@@ -1070,7 +1074,9 @@ class NatSimulation:
                 (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
             
             print "\nBlock=%04d, Distribution: " % curBlock, distrib 
-            self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=True)
+            sres = self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=True)
+            statAccum.append(sres['distrib'])
+            
             print "=" * 180
             
             # State reset for next iteration
@@ -1082,6 +1088,7 @@ class NatSimulation:
             samplesRes = []
             natA.reset()
             curBlock+=1
+            if curBlock >= maxBlock: break
         
         # kill subprocess if exists
         if self.proc!=None:
@@ -1096,6 +1103,19 @@ class NatSimulation:
                 fileObject.close()
             except Exception, e:
                 pass
+        
+        # evalueate statistical resutls
+        if (len(statAccum)==0): return
+        hypotheses = np.array([0]  * len(statAccum[0]))     # passes/not passed test
+        pvals      = [[] for i in range(len(statAccum[0]))] # p-values array
+        for s in statAccum:
+            hypotheses += np.array( [(1 if (t['pval'] >= 0.05 and not np.isnan(t['pval'])) else 0) for t in s] )
+            for i,t in enumerate(s): 
+                if t['pval'] != 0 and not np.isnan(t['pval']): pvals[i].append(t['pval'])  
+        
+        print "Hypothesis tests results (total=%d) " % curBlock, hypotheses
+        print "Median p-value: ", [np.median(s) for s in pvals]
+        
     
     def simulation(self, natA, natB, strategy):
         '''
@@ -1643,7 +1663,7 @@ class NatSimulation:
         '''
         Compute basic statistics of a given distribution, draws histrogram.
         '''
-        chi_p, pval_p, chi, pval, tmp_n, tmp_p, chi_p2, pval_p2, m2 = 0, 0, 0, 0, 0, 0, 0, 0, 0
+        chi1, pval1, chi3, pval3, tmp_n3, tmp_p3, chi2, pval2, m2 = 0, 0, 0, 0, 0, 0, 0, 0, 0
         
         #
         # Compute basic statistics
@@ -1659,22 +1679,22 @@ class NatSimulation:
         # the expected value is shifted in i-th round by i to the right, but lamda is still same! 
         # Thus for E[X] = ex, Ex[S] = i + i*T*lambda.  
         if step!=-1:
-            (chi_p2, pval_p2, m2) = self.goodMatchPoisson(ex-step, portDistrib, ports, iterations, shift=int(step * (-1)))
+            (chi2, pval2, m2) = self.goodMatchPoisson(ex-step, portDistrib, ports, iterations, shift=int(step * (-1)))
             print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-                (('%04.4f' % ex/2).zfill(8), ('%04.4f' % chi_p2).zfill(10), pval_p2, "is REJECTED" if pval_p2 < 0.05 else "holds      ", self.pearsonCorelation(m2, portDistrib))#
+                (('%04.4f' % ex-step).zfill(8), ('%04.4f' % chi2).zfill(10), pval2, "is REJECTED" if pval2 < 0.05 else "holds      ", self.pearsonCorelation(m2, portDistrib))#
         
-        (chi_p, pval_p, m1) = self.goodMatchPoisson(ex, portDistrib, ports, iterations, shift=0)
+        (chi1, pval1, m1) = self.goodMatchPoisson(ex, portDistrib, ports, iterations, shift=0)
         print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-            (('%04.4f' % ex).zfill(8), ('%04.4f' % chi_p).zfill(10), pval_p, "is REJECTED" if pval_p < 0.05 else "holds      ", self.pearsonCorelation(m1, portDistrib))
+            (('%04.4f' % ex).zfill(8), ('%04.4f' % chi1).zfill(10), pval1, "is REJECTED" if pval1 < 0.05 else "holds      ", self.pearsonCorelation(m1, portDistrib))
             
-        (chi, pval, tmp_n, tmp_p, m3) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
+        (chi3, pval3, tmp_n3, tmp_p3, m3) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
         print "Chi-Squared test on match with Bi(%04d, %04.4f): Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-            (tmp_n, tmp_p, ('%04.4f' % chi).zfill(10), pval, "is REJECTED" if pval < 0.05 else "holds      ", self.pearsonCorelation(m3, portDistrib))        
+            (tmp_n3, tmp_p3, ('%04.4f' % chi3).zfill(10), pval3, "is REJECTED" if pval3 < 0.05 else "holds      ", self.pearsonCorelation(m3, portDistrib))        
 
         # Negative binomial try - for real data from netflow
-        (chi, pval, tmp_n, tmp_p, m4) = self.goodMatchNegativeBinomial(ex, var, portDistrib, ports, iterations, False, wiseBinning=True)
+        (chi4, pval4, tmp_n4, tmp_p4, m4) = self.goodMatchNegativeBinomial(ex, var, portDistrib, ports, iterations, False, wiseBinning=True)
         print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-            (tmp_n, tmp_p, ('%04.4f' % chi).zfill(10), pval, "is REJECTED" if pval < 0.05 else "holds      ", self.pearsonCorelation(m4, portDistrib))
+            (tmp_n4, tmp_p4, ('%04.4f' % chi4).zfill(10), pval4, "is REJECTED" if pval4 < 0.05 else "holds      ", self.pearsonCorelation(m4, portDistrib))
             
         #
         # Draw a histogram
@@ -1718,8 +1738,10 @@ class NatSimulation:
                 plt.show()
                 
         return {'ssum' : ssum, 'ex': ex, 'var': var, 'stdev': stdev, 
-                'chi_p': chi_p, 'pval_p': pval_p, 
-                'chi': chi, 'pval': pval, 'n': tmp_n, 'p': tmp_p
+                'distrib': [ {'chi': chi1, 'pval': pval1, 'm':m1},                              # Poisson
+                             {'chi': chi2, 'pval': pval2, 'm':m2},                              # Poisson, shifted
+                             {'chi': chi3, 'pval': pval3, 'm':m3, 'n': tmp_n3, 'p': tmp_p3},    # Binomial
+                             {'chi': chi4, 'pval': pval4, 'm':m4, 'n': tmp_n4, 'p': tmp_p4}]    # Negative binomial
                 }
     
     def pearsonCorelation(self, model, observed):
