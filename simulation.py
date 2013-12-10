@@ -2417,10 +2417,20 @@ if __name__ == "__main__":
         f.write("New start at %s; scanInterval=%d; strategy=%s file=[%s]\n" % (time.time(), ns.portScanInterval, args.strategy, args.output))
         print "Scanning port interval: %d" % ns.portScanInterval
         
-        lmbdArr = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, \
-                   0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, \
-                   0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, \
-                   0.2, 0.21, 0.22, 0.23, 0.24, 0.25]
+        # COnstruct lambda array to search in
+        lmbdArr = []
+        lmbdArr.extend( [i * 0.001 for i in range(1, 10)] )       # fine tuning
+        lmbdArr.extend( [i * 0.01 for i in range(0, 26)] )        # 0.10 .. 0.25 interval scan
+        lmbdArr.extend( [0.03 + i * 0.001 for i in range(0, 50)] )
+        #
+        # benchmarking NAT traversal algorithm on different lambdas
+        #
+        lmbdArr = list(set(lmbdArr))    # duplicity removal, round on 4 decimal places
+        lmbdArr.sort()                  # sort - better user intuition
+        print "="*80
+        print "Lambdas that will be benchmarked: \n", (", ".join(['%04.3f' % i for i in lmbdArr]))
+        print "="*80
+        
         for clmb in lmbdArr:
             res = []
             mem = getMem()
