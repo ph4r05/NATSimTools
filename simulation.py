@@ -26,9 +26,14 @@ import calendar
 import bisect
 import heapq
 from heapq import heappush, heappop
+import resource
+import gc
 
 # Fibonacchi list generator
 def fibGenerator():
+    '''
+    Fibonacci sequence generator
+    '''
     a, b = 0, 1
     yield 0
     while True:
@@ -57,13 +62,22 @@ def probRound(x):
         return int(flr) 
 
 def hashcode(s):
+    '''
+    Simple hashcode implementation for strings and integers.
+    '''
     h = 0
     if isinstance(s, ( int, long ) ): return s
     for c in s:
         h = (31 * h + ord(c)) & 0xFFFFFFFF
     return ((h + 0x80000000) & 0xFFFFFFFF) - 0x80000000
 
-class Strategy:
+def getMem():
+    '''
+    Returns current memory consumption in MB (float)
+    '''
+    return (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1000.0)
+
+class Strategy(object):
     '''
     Base abstract class for NAT strategy
     '''
@@ -79,7 +93,7 @@ class Strategy:
         '''
         pass
 
-class Nat:
+class Nat(object):
     '''
     Base abstract class for NAT allocation
     '''
@@ -104,9 +118,11 @@ class Nat:
     def peekNext(self):
         raise Exception("Not implemented yet...")
 
-class Quartet:
+class Quartet: #(object):
     '''
-    SrcIP, srcPort, DstIP, DstPort
+    SrcIP, srcPort, DstIP, DstPort.
+    Was new-style class [http://docs.python.org/2/reference/datamodel.html#newstyle] - inheriting from object,
+    but the execution was slower since it is uses very often. 
     '''
     srcIP=0
     srcPort=0
@@ -309,8 +325,7 @@ class SymmetricIncrementalNat(SymmetricNat):
     lastPort = 0
     
     def reset(self):
-        self.allocatedPorts={}
-        self.allocations={}
+        super(SymmetricIncrementalNat, self).reset()
         self.lastPort = 0
         
     def nextPort(self):
@@ -522,7 +537,6 @@ class BinomialStrategy(Strategy):
     
     def next(self, party, step):
         return (0, int(self.startPos[party] + self.b[party][min(step, len(self.b[party])-1)]))
-
 
 class PoissonStrategy(Strategy):
     '''
@@ -804,7 +818,7 @@ class NfdumpReader(NfdumpAbstract):
             
         self.deinit()
 
-class NatSimulation:
+class NatSimulation(object):
     
     # Lambda for Poisson process generator. Time unit = 1 ms
     # Intuitively: represents rate of creation of new events in given period.
@@ -1695,19 +1709,21 @@ class NatSimulation:
         '''
         t = 0.0
         N = 0
-        while N <= poolsize:
+        i = 0
+        while N <= poolsize and i < 5*poolsize:
             # U ~ U(0,1), uniform distribution
             U = random.random()
+            i+= 1
             
             # next time of the event, exponential distribution
             t = t + (-(1/lmbd) * math.log(U))
-            if (N > poolsize): return t
+            if (N > poolsize): break
         
             # increment the event counter
             N = N + 1
             #print "New event will occur: " + str(t) + ("; now events: %02d" % N)
         print "Port pool will be exhausted in %05.3f ms = %05.3f s = %05.3f min = %05.3f h" % (t, t/1000.0, t/1000.0/60, t/1000.0/60/60)
-        print "P(X > portPoolSize) = %02.3f where X~Poisson(timeout * lamda)" % (1.0-poisson.cdf(poolsize, lmbd * timeout))
+        print "P(X > portPoolSize) = %02.18f where X~Poisson(timeout * lamda = %d * %04.4f)" % (1.0-poisson.cdf(poolsize, float(lmbd) * timeout), timeout, lmbd)
         return t 
     
     def poolExhaustionEx(self, natA, timeout):
@@ -2297,13 +2313,15 @@ if __name__ == "__main__":
     parser.add_argument('-n','--nfdump',    help='NFdump file', required=False, default=None)
     parser.add_argument('-m','--nfdump_sorted',help='NFdump sorted file', required=False, default=None)
     parser.add_argument('-f','--filter',    help='NFdump filter', required=False, default=None)
-    parser.add_argument('-g','--hostnet',   help='NFdump host address', required=False, default="0.0.0.0")
+    parser.add_argument('-g','--hostnet',   help='NFdump host address', required=False, default="147.250.")
     parser.add_argument('--lmbd',           help='Default Poisson lambda for simulations', required=False, type=float, default=0.1)
     parser.add_argument('--pdistrib',       help='Switch to compute port distribution function', required=False, default=False, action='store_true')
     parser.add_argument('--nfdistrib',      help='Switch to compute netflow port distribution function', required=False, default=False, action='store_true')
     parser.add_argument('--sim',            help='Starts traversal algorithm simulation', required=False, default=False, action='store_true')
     parser.add_argument('--nfsim',          help='Starts traversal algorithm simulation with netflow data', required=False, default=False, action='store_true')
     parser.add_argument('--benchmark',      help='Algorithm benchmarking for graphs', required=False, default=False, action='store_true')
+    parser.add_argument('--exhaust',        help='Pool exhaustion computation', required=False, default=False, action='store_true')
+    parser.add_argument('--exhaust_p',      help='Probability of port pool exhaustion to compute with', required=False, default=0.99, type=float)
     args = parser.parse_args()
     
     ns = NatSimulation()
@@ -2314,15 +2332,6 @@ if __name__ == "__main__":
     
     natA.init(None)
     natB.init(None)
-    
- #   print ns.poolExhaustionNat(natA, 3*60*1000)
-#    
-#    print "Lambda that will exhaust given NAT: "
-#    lmbd = ns.getLambdaExhaustion(natA)
-#    print "\nLambda that will exhaust given NAT: ", lmbd
-#    
-#    print ns.getLambdaExhaustionCDF(natA, 0.999)
-#    sys.exit()
     
     strategies=[getStrategy(args.strategy), getStrategy(args.strategy)]
     strategies[0].init(None)
@@ -2341,6 +2350,24 @@ if __name__ == "__main__":
     ns.portScanInterval = args.space
     ns.silentPeriodBase=1000
     ns.silentPeriodlmbd=100
+    
+    #
+    # Port pool exhaustion computation
+    #
+    if args.exhaust:
+        print "="*80
+        print "Computing port pool exhaustion\n"
+        print ns.poolExhaustionNat(natA, 3*60*1000)
+        
+        print "="*80
+        print "Computing lambda value that will cause NAT port pool exhaustion at some point..."
+        lmbd = ns.getLambdaExhaustion(natA)
+        print "\nLambda that will exhaust given NAT: ", lmbd
+       
+        print "="*80
+        print "Computing lambda exhaustion value with probability=%01.3f" % args.exhaust_p
+        print ns.getLambdaExhaustionCDF(natA, args.exhaust_p)
+
     
     #
     # NFdump
@@ -2381,10 +2408,13 @@ if __name__ == "__main__":
     #
     if args.benchmark:
         # generating graph for moving lambda
+        gc.enable()
+        
         f = open(args.output, 'a+')
         ns.portScanInterval = args.space
         
-        f.write("New start at %s; scanInterval=%d; strategy=%s\n" % (time.time(), ns.portScanInterval, args.strategy))
+        gc.collect()    # garbage collection is really needed...
+        f.write("New start at %s; scanInterval=%d; strategy=%s file=[%s]\n" % (time.time(), ns.portScanInterval, args.strategy, args.output))
         print "Scanning port interval: %d" % ns.portScanInterval
         
         lmbdArr = [0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, \
@@ -2392,7 +2422,9 @@ if __name__ == "__main__":
                    0.1, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, \
                    0.2, 0.21, 0.22, 0.23, 0.24, 0.25]
         for clmb in lmbdArr:
-            print "# Current lambda: %03.4f" % clmb
+            res = []
+            mem = getMem()
+            print "# Current lambda: %03.4f; Avg silent period: %04.4f; Mem: %04.2f MB" % (clmb, clmb * (ns.silentPeriodBase + ns.silentPeriodlmbd), mem)
             if args.lmbd_start!=-1 and clmb < args.lmbd_start: continue
             
             ns.lmbd = clmb
