@@ -29,6 +29,19 @@ from heapq import heappush, heappop
 import resource
 import gc
 
+# Multiple plots
+from mpl_toolkits.axes_grid1 import host_subplot
+import mpl_toolkits.axisartist as AA
+
+# MLE distribution fitting with RPy - python binding for R
+from rpy2.robjects import r
+from rpy2.robjects import IntVector 
+from rpy2.robjects.packages import importr
+  
+# Load the MASS library for distribution fitting
+# See more at: http://thomas-cokelaer.info/blog/2011/08/fitting-distribution-by-combing-r-and-python/#sthash.TiVb9HpI.dpuf 
+MASS = importr('MASS') 
+
 # Fibonacchi list generator
 def fibGenerator():
     '''
@@ -76,6 +89,15 @@ def getMem():
     Returns current memory consumption in MB (float)
     '''
     return (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1000.0)
+
+def graph(plt, x='Sample', y='Port number', loc=1):
+    if loc!=-1:
+        plt.legend(loc=loc)
+    plt.xlabel('Sample')
+    plt.ylabel('Port number') #,rotation='horizontal')
+    plt.grid(True)
+    plt.show()
+    plt.close()
 
 class Strategy(object):
     '''
@@ -209,7 +231,7 @@ class SymmetricNat(Nat):
         port=-1
         prev=None
         while tries <= self.poolLen:
-            port,prev = self.peekPort(prev) # nextPort()              # linear port allocation rule here
+            port,prev = self.peekPort(prev) # nextPort()       # linear port allocation rule here
             tries += 1                                         # check pool exhaustion
             if port in self.allocatedPorts:
                 # next port is already allocated, what about timeout?
@@ -348,13 +370,13 @@ class TheirStragegy(Strategy):
     '''
     Strategy of changing source port - published by other team
     '''
-    delta = [1000,1000]
+    delta = [900,900]
     startPos=[0,0]
     def init(self, params=None):
         pass    
     
     def silent(self, time1, time2, lmbd):
-        self.delta = [int(time1*lmbd*6), int(time2*lmbd*6)]
+        #self.delta = [max(100, int(time1*lmbd*3)), max(100, int(time2*lmbd*3))]
         self.startPos = self.delta
         return self.delta
         
@@ -402,14 +424,21 @@ class I2JStragegy(Strategy):
         #
         # Use expected value instead of a random sample as a starting point. E(X) = lmbd, X ~ Po(lmbd)
         # should be the central.
-        if lmbd >= 0.035:
-            self.startPos=[int(lmbd * time1), int(lmbd * time2)]
+        #if lmbd >= 0.035:
+        c = 0
+        if lmbd >=  0.035: c=-10000.0*lmbd*lmbd + 950.0*lmbd - 21.0 
+        if lmbd >= 0.05:   c=2
+        self.startPos=[int(0 * lmbd * time1), int(0 * lmbd * time2)]
         #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
         return self.startPos
         
     def next(self, party, step):
-        if party==0: return (0, int(self.startPos[0]+step))
-        if party==1: return (0, int(self.startPos[1]+2*step))
+        # This random stepping used to work
+        #if party==0: return (0, int(self.startPos[0]+random.randint(1,3)*step )) #int(self.startPos[0]+step-150*(step/100)))
+        #if party==1: return (0, int(self.startPos[0]+random.randint(1,5)*step )) #int(self.startPos[1]+2*step-230*(step/100)))
+        
+        if party==0: return (0, int(self.startPos[0]+step )) #int(self.startPos[0]+step-150*(step/100)))
+        if party==1: return (0, int(self.startPos[0]+2*step )) #int(self.startPos[1]+2*step-230*(step/100)))
 
 class SimpleStrategy(Strategy):
     '''
@@ -551,7 +580,8 @@ class PoissonStrategy(Strategy):
     sim  = None
     lmbd = 0.1
     dupl = False
-    coef = 1.4773
+    #coef = 1.4127
+    coef = 1.1772
     
     b = [[],[]]
     def init(self, params=None): 
@@ -568,6 +598,21 @@ class PoissonStrategy(Strategy):
         self.gen()
         pass
     
+    def coe(self, x):
+        #return (4.43727 * math.exp(-2.156 * x))
+        #return -0.928467 * math.log(0.255879 * x)       # this formula is OK for lambda [0.01, 0.07], t=10
+        #return 1.0 / (0.161918 * math.log(65.7525 * x)) # OK for [0.04 , 0.15], t=10
+        
+        # this works pretty well
+        return 1.0 / (0.163321 * math.log(64.2568 * x))  # OK for [0.04 , 0.15], t=10
+    
+        # experimental
+        #return 1.0 / (0.165     * math.log(64 * x))  # OK for [0.04 , 0.15], t=10
+        #return 6.18 / (math.log(x) + 4.28)  # OK for [0.04 , 0.15], t=10
+        
+        # very good fit for low intervals
+        return 1.0 / (0.172876+1.28162*x-1.41256*x*x+0.825093*x*x*x-0.184726*x*x*x*x)
+        
     def genPart(self, party):
         # lambda on both sides
         lmbd = self.sim.lmbd if self.sim!=None else self.lmbd
@@ -580,7 +625,9 @@ class PoissonStrategy(Strategy):
         seen_add = seen.add
         
         for step in range(0, 3001):
-            x = int(NatSimulation.poisson(lmbd, t * (1+step*self.coef)    ))
+            #x = int(  np.random.poisson(lmbd * t * (1+step*self.coe(lmbd*t)))  )
+            x = int(  np.random.poisson(lmbd * t * (1+step*self.coef))  )
+            #x = int(np.random.poisson(step * (1 + lmbd * 10)))
             if self.dupl or (x not in seen and not seen_add(x)): 
                 b.append(x)
         return b
@@ -591,6 +638,7 @@ class PoissonStrategy(Strategy):
     def silent(self,  time1, time2, lmbd):
         self.lmbd = lmbd
         self.startPos=[int(lmbd * time1), int(lmbd * time2)] # expected value
+        self.gen()
         #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]        
         return self.startPos
     
@@ -638,8 +686,8 @@ def nfline2tuple(line):
     tstart = tpl[0]
     tdur   = float(tpl[1])
     
-    dtime = dparser.parse(tstart)           # Parse time from nfdump to datetime format
-    startUtc = NatSimulation.dtimeToUtc(dtime)            # convert date time string to UTC
+    dtime = dparser.parse(tstart)              # Parse time from nfdump to datetime format
+    startUtc = NatSimulation.dtimeToUtc(dtime) # convert date time string to UTC
     lastData = int(startUtc + round(tdur)) 
     tpl.append(startUtc)
     tpl.append(lastData)
@@ -1078,8 +1126,8 @@ class NatSimulation(object):
         
         natA              = nat where to perform connection requests, can be reseted multiple times 
                             in this method. This instance should be dedicated just for this method. 
-        T                 = milliseconds sampling time, each sample is done after 
-        sampleSize        = number of samples
+        T                 = milliseconds sampling time of NAT state (port), each sample is done after this period
+        sampleSize        = number of samples (port numbers returned), number of windows of size T milliseconds.
         recStartSkip      = number of records to skip from the beginning of the file
         recEachSkip       = number of records to skip after the one taken
         sampleEachSkip    = number of records
@@ -1098,6 +1146,7 @@ class NatSimulation(object):
         samplePort = []         # sampling port numbers - whole process
         curTestSize=0
         curBlock=0
+        natA.reset()
         
         recCurSkipCnt = 0       # number of records designated for skipping 
         
@@ -1192,22 +1241,25 @@ class NatSimulation(object):
             if curBlock >= maxBlockSize: break        
         pass
     
-    def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None):
+    def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, drawHist=True, sampleSize = 500, maxBlock=50):
         '''
         Reads nfdump file with given filter and simulates NAT
+        
+        sampleSize - number of NAT port samples in one block
         '''
         
         #
         # Run NFdump and read line by line
         #
         activeTimeout = 300*1000 # active timeout = time after a long lived flow is ended and written to a netflow file
-        samplesRes = []         # sampling new connections (curr port - last port)
-        sampleSize = 100
+        samplesRes = []          # sampling new connections (curr port - last port)
         sampleSkip = 5000
         curTestSize=0
         curBlock=0
-        maxBlock=100
+        statRes  =[]
         statAccum=[]
+        statDesc =[]
+        natA.reset()
         fileDesc = 't%04d_s%05d_sk%05d' % (self.portScanInterval, sampleSize, sampleSkip)
         
         # Prepare nfdump record generator.
@@ -1221,6 +1273,7 @@ class NatSimulation(object):
             nfdumpGenerator = nfdumpObj.generator()
         
         # generates samples of NAT process w.r.t. new connections.
+        print "Starting sampling; sampleSize=%04d; sampleSkip=%04d; maxBlock=%04d; T=%03d" % (sampleSize, sampleSkip, maxBlock, self.portScanInterval)
         nfgen = self.nfdumpSampleGenerator(natA, nfdumpGenerator, homeNet, self.portScanInterval, 
                                            sampleSize, sampleSkip, 0, maxBlock, activeTimeout)
         
@@ -1228,6 +1281,7 @@ class NatSimulation(object):
         for samplesRes in nfgen:
             # Process & analyze data
             maxE = max(samplesRes)+1
+            curTestSize = len(samplesRes)
             
             # Convert list of port numbers in each sample to frequency distribution
             distrib = [0] * (maxE)
@@ -1237,37 +1291,19 @@ class NatSimulation(object):
             
             ssum, ex, var, stdev = self.calcPortDistribInfo(distrib, sampleSizeR)
             files = [('distrib/nfdump_' + fileDesc + ("_%04d" % curBlock) + tmpf) for tmpf in ['.pdf', '.png', '.svg']]
-            
+                        
             print "Sampling done... max=%d, sampleSize=%d target=%d sum=%d" % (maxE, curTestSize, sampleSize, sum(distrib))
-            
-            chis = [9999999]
-            for i in range(0,0): #200
-                lmbd = max(ex-10.0,0) + float(i)*0.1
-                (chi_p, pval_p) = self.goodMatchPoisson(lmbd, distrib, maxE, sampleSizeR, True, wiseBinning=True)
-                if chi_p==0 or chi_p>700.0: continue
-                if chi_p > 0: chis.append(chi_p)
-                print "Chi-Squared test on match with Po(%04.4f): Chi: %06.3f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
-                    (lmbd, chi_p, pval_p, "is REJECTED" if pval_p < 0.05 else "holds")
-            print "Minimal Chi: ", min(chis)
-            
-            chis = [9999999]
-            for i in range(0,0): #200
-                lmbd = max(ex-10.0,0) + float(i)*0.1
-                (chi, pval, tmp_n, tmp_p, m1) = self.goodMatchBinomialNP(lmbd/0.5, 0.5, distrib, maxE, sampleSizeR, False, wiseBinning=True)
-                if chi==0 or chi>1000.0: continue
-                if chi>0: chis.append(chi)
-                print "Chi-Squared test on match with Bi(%04.4f, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
-                    (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
-            print "Minimal Chi: ", min(chis)
-            
-            # Negative binomial try
+
+            # Negative binomial try - wise binning disabled.
             (chi, pval, tmp_n, tmp_p, m2) = self.goodMatchNegativeBinomial(ex, var, distrib, maxE, sampleSizeR, False, wiseBinning=False)
             print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %04.4f, p-value=%01.25f; alpha=0.05; hypothesis %s" % \
                 (tmp_n, tmp_p, chi, pval, "is REJECTED" if pval < 0.05 else "holds")
             
             print "\nBlock=%04d, Distribution: " % curBlock, distrib 
-            sres = self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=False)
+            sres = self.histAndStatisticsPortDistrib(distrib, sampleSizeR, maxE, files, drawHist=drawHist)
+            statRes.append(sres)
             statAccum.append(sres['distrib'])
+            statDesc.append((ex,var))
             
             print "=" * 180
             
@@ -1278,19 +1314,34 @@ class NatSimulation(object):
         
         # force generator de-initialization
         nfdumpObj.deinit()
+        natA.reset()
         
         # evalueate statistical resutls
         if (len(statAccum)==0): return
         hypotheses = np.array([0]  * len(statAccum[0]))     # passes/not passed test
         pvals      = [[] for i in range(len(statAccum[0]))] # p-values array
-        for s in statAccum:
+        chisq      = [[] for i in range(len(statAccum[0]))] # chi-sqiared values array
+        pvalsK     = [[] for i in range(len(statAccum[0]))] # p-values array, keys
+        chisqK     = [[] for i in range(len(statAccum[0]))] # chi-sqiared values array, keys
+        for k, s in enumerate(statAccum):
             hypotheses += np.array( [(1 if (t['pval'] >= 0.05 and not np.isnan(t['pval'])) else 0) for t in s] )
             for i,t in enumerate(s): 
-                if t['pval'] != 0 and not np.isnan(t['pval']): pvals[i].append(t['pval'])  
+                if t['pval'] != 0 and not np.isnan(t['pval']): 
+                    pvals[i].append(t['pval'])
+                    pvalsK[i].append(k)
+                if t['chi']  != 0 and not np.isnan(t['chi']) : 
+                    chisq[i].append(t['chi'])
+                    chisqK[i].append(k)
         
         print "Hypothesis tests results (total=%d) " % curBlock, hypotheses
         print "Median p-value: ", [np.median(s) for s in pvals]
-    
+        print "Median chi-squared value: ", [np.median(s) for s in chisq]
+        return {'n': curBlock,      'h': hypotheses, 
+                'pv': pvals,        'pk': pvalsK, 
+                'cv': chisq,        'ck': chisqK, 
+                'st': statAccum,    'sd': statDesc,
+                'sr': statRes}
+         
     def simulationCore(self, natSamples, strategies, nats, stopOnFirstMatch = False):
         '''
         Core of simulation algorithm, simulates one round of an algorithm with given strategy, 
@@ -1420,6 +1471,13 @@ class NatSimulation(object):
                 natSamples[i] = [int(x) for x in np.random.poisson(self.lmbd*self.portScanInterval, self.errors)] 
             (res, portsA, mapA, scanA, totalLagA, stepMap) = self.simulationCore(natSamples, [strategy, strategy], nats, stopOnFirstMatch)
             
+            # Stop early if poor performance
+            if sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast:
+                sys.stdout.write('Z')
+                sys.stdout.flush()
+                realRounds = sn+1
+                break 
+            
             # fail -> nothing to do now
             if (len(res) == 0): 
                 continue
@@ -1427,13 +1485,6 @@ class NatSimulation(object):
             successCnt += 1.0
             successAcc[0] += mapA[0][res[0][0]]
             successAcc[1] += mapA[1][res[0][1]]
-            
-            # Stop early if poor performance
-            if False and sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast:
-                sys.stdout.write('Z')
-                sys.stdout.flush()
-                realRounds = sn+1
-                break 
         
         simEnd = getTime()
         simTotal = simEnd - simStart    
@@ -1694,7 +1745,7 @@ class NatSimulation(object):
         f.close()
         
         # generate SVG file
-        print "GraphViz output: ", subprocess.Popen('neato -Tsvg < dotfile.dot > dotfile.svg', shell=True).communicate()[0]
+        print "GraphViz output: ", subprocess.Popen('neato -Tpng < dotfile.dot > dotfile.png', shell=True).communicate()[0]
     
     def poolExhaustionNat(self, natA, timeout):
         return self.poolExhaustion(timeout, natA.poolLen, self.lmbd)
@@ -1972,11 +2023,11 @@ class NatSimulation(object):
             print "Step %03d" % step
             self.histAndStatisticsPortDistrib(portDistribSteps[step], iterations, ports, 'distrib/step_%s_%03d__%04d.png' % (lmbdStr, t, step), drawHist=True, step=step)
     
-    def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None, drawHist=False, step=-1):
+    def histAndStatisticsPortDistrib(self, portDistrib, iterations, ports, fname=None, histWidth=None, drawHist=False, step=-1, dist=None):
         '''
         Compute basic statistics of a given distribution, draws histrogram.
         '''
-        chi1, pval1, chi3, pval3, tmp_n3, tmp_p3, chi2, pval2, m2 = 0, 0, 0, 0, 0, 0, 0, 0, 0
+        chi1, pval1, chi3, pval3, n3, p3, chi2, pval2, m2, l2, rr2 = 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         
         #
         # Compute basic statistics
@@ -1987,27 +2038,50 @@ class NatSimulation(object):
         #print "dist=[",(" ".join([ '%04d=%01.5f, %s' % (i, i/float(iterations), "\n" if (p % 40) == 39 else '') for p, i in enumerate(portDistrib)])),"]"
         
         #
+        # Maximum Likelihood Estimation (MLE) of parameter lambda for poisson distribution.
+        # MLE for poisson = sample mean
+        # [https://onlinecourses.science.psu.edu/stat504/node/28]
+        #
+        (chi1, pval1, m1) = self.goodMatchPoisson(ex, portDistrib, ports, iterations, shift=0)
+        rr1               = self.pearsonCorelation(m1, portDistrib)
+        print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
+            (('%04.4f' % ex).zfill(8), ('%04.4f' % chi1).zfill(10), pval1, "is REJECTED" if pval1 < 0.05 else "holds      ", rr1)
+            
+        #
         # Try to approximate with poisson distribution and binomial distribution
         # Sum of N independent Po: Po(l)+Po(l)+...+Po(l) =~ Po(lN), incrementing by 1 in each step 
         # the expected value is shifted in i-th round by i to the right, but lamda is still same! 
-        # Thus for E[X] = ex, Ex[S] = i + i*T*lambda.  
+        # Thus for E[X] = ex, Ex[S_i] = i + i*T*lambda. where i=step.  
         if step!=-1:
-            (chi2, pval2, m2) = self.goodMatchPoisson(ex-step, portDistrib, ports, iterations, shift=int(step * (-1)))
+            l2 = ex-step
+            (chi2, pval2, m2) = self.goodMatchPoisson(l2, portDistrib, ports, iterations, shift=int(step * (-1)))
+            rr2               = self.pearsonCorelation(m2, portDistrib)
             print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-                (('%04.4f' % (ex-step)).zfill(8), ('%04.4f' % chi2).zfill(10), pval2, "is REJECTED" if pval2 < 0.05 else "holds      ", self.pearsonCorelation(m2, portDistrib))#
-        
-        (chi1, pval1, m1) = self.goodMatchPoisson(ex, portDistrib, ports, iterations, shift=0)
-        print "Chi-Squared test on match with Po(%s):     Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-            (('%04.4f' % ex).zfill(8), ('%04.4f' % chi1).zfill(10), pval1, "is REJECTED" if pval1 < 0.05 else "holds      ", self.pearsonCorelation(m1, portDistrib))
-            
-        (chi3, pval3, tmp_n3, tmp_p3, m3) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
+                (('%04.4f' % (l2)).zfill(8), ('%04.4f' % chi2).zfill(10), pval2, "is REJECTED" if pval2 < 0.05 else "holds      ", rr2)#
+        elif var < ex:
+            l2 = var
+            (chi2, pval2, m2) = self.goodMatchPoisson(l2, portDistrib, ports, iterations, shift=int((ex-var) * (-1)))
+            rr2               = self.pearsonCorelation(m2, portDistrib)
+            print "Chi-Squared test on match with Po(%s)s:    Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
+                (('%04.4f' % (l2)).zfill(8), ('%04.4f' % chi2).zfill(10), pval2, "is REJECTED" if pval2 < 0.05 else "holds      ", rr2)#
+           
+        # Binomial distribution - may be handy on port distribution functions in a particular step. 
+        (chi3, pval3, n3, p3, m3) = self.goodMatchBinomial(ex, var, portDistrib, ports, iterations, wiseBinning=True)
+        rr3                       = self.pearsonCorelation(m3, portDistrib)
         print "Chi-Squared test on match with Bi(%04d, %04.4f): Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-            (tmp_n3, tmp_p3, ('%04.4f' % chi3).zfill(10), pval3, "is REJECTED" if pval3 < 0.05 else "holds      ", self.pearsonCorelation(m3, portDistrib))        
+            (n3, p3, ('%04.4f' % chi3).zfill(10), pval3, "is REJECTED" if pval3 < 0.05 else "holds      ", rr3)        
 
         # Negative binomial try - for real data from netflow
-        (chi4, pval4, tmp_n4, tmp_p4, m4) = self.goodMatchNegativeBinomial(ex, var, portDistrib, ports, iterations, False, wiseBinning=True)
+        (chi4, pval4, n4, p4, m4) = self.goodMatchNegativeBinomial(ex, var, portDistrib, ports, iterations, False, wiseBinning=True)
+        rr4                       = self.pearsonCorelation(m4, portDistrib)
         print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
-            (tmp_n4, tmp_p4, ('%04.4f' % chi4).zfill(10), pval4, "is REJECTED" if pval4 < 0.05 else "holds      ", self.pearsonCorelation(m4, portDistrib))
+            (n4, p4, ('%04.4f' % chi4).zfill(10), pval4, "is REJECTED" if pval4 < 0.05 else "holds      ", rr4)
+        
+        # Nefative binomial - MLE for parameters
+        (chi5, pval5, n5, p5, m5, par5) = self.goodMatchNegativeBinomialMLE(portDistrib, ports, iterations, False, wiseBinning=True)
+        rr5                             = self.pearsonCorelation(m5, portDistrib)
+        print "Chi-Squared test on match with NB(%04d, %04.4f): Chi: %s, p-value=%01.25f; alpha=0.05; hypothesis %s r=%01.8f" % \
+            (n5, p5, ('%04.4f' % chi5).zfill(10), pval5, "is REJECTED" if pval5 < 0.05 else "holds      ", rr5)
             
         #
         # Draw a histogram
@@ -2031,11 +2105,12 @@ class NatSimulation(object):
             plt.xlim(tlow,thigh)
             
             plt.bar(pos, portDistrib, width, color='r')
-            plt.plot(pos, m1, 'g^')
-            plt.plot(pos, m3, 'c>')
-            plt.plot(pos, m4, 'yp')
+            plt.plot(pos, m1, 'g^', label="Po")
+            plt.plot(pos, m5, 'mp', label="NB")
+            #plt.plot(pos, m4, 'c>', label="BN")
+            
             if step!=-1:
-                plt.plot(pos, m2, 'b^')
+                plt.plot(pos, m2, 'b^', label="$Po_2$")
             
             if fname != None:
                 if isinstance(fname, list):
@@ -2051,10 +2126,13 @@ class NatSimulation(object):
                 plt.show()
                 
         return {'ssum' : ssum, 'ex': ex, 'var': var, 'stdev': stdev, 
-                'distrib': [ {'chi': chi1, 'pval': pval1, 'm':m1},                              # Poisson
-                             {'chi': chi2, 'pval': pval2, 'm':m2},                              # Poisson, shifted
-                             {'chi': chi3, 'pval': pval3, 'm':m3, 'n': tmp_n3, 'p': tmp_p3},    # Binomial
-                             {'chi': chi4, 'pval': pval4, 'm':m4, 'n': tmp_n4, 'p': tmp_p4}]    # Negative binomial
+                'distrib': [
+                     {'chi': chi1, 'pval': pval1, 'm': m1, 'r2': rr1, 'par': [ex], 'lmbd': ex},             # Poisson
+                     {'chi': chi2, 'pval': pval2, 'm': m2, 'r2': rr2, 'par': [l2], 'lmbd': l2},             # Poisson, shifted, variance based
+                     {'chi': chi3, 'pval': pval3, 'm': m3, 'r2': rr3, 'par': [n3,p3], 'n': n3, 'p': p3},    # Binomial
+                     {'chi': chi4, 'pval': pval4, 'm': m4, 'r2': rr4, 'par': [n4,p4], 'n': n4, 'p': p4},    # Negative binomial
+                     {'chi': chi5, 'pval': pval5, 'm': m5, 'r2': rr5, 'par': [n5,p5], 'n': n5, 'p': p5}     # Negative binomial, MLE
+                    ]    
                 }
     
     def pearsonCorelation(self, model, observed):
@@ -2148,6 +2226,8 @@ class NatSimulation(object):
         '''
         Performs Chi-Squared test that given data comes from negative binomial distribution.
         Number of bins to sample from poisson=0..bins
+        
+        Old method: estimate n,p parameters of the model from EX, VAR.
         '''
         # X ~ NBinom(n, p)
         # E[x] = np/(1-p)
@@ -2175,6 +2255,31 @@ class NatSimulation(object):
         expected = [(iterations * nbinom.pmf(i, n, p)) for i in range(0, bins)]
         (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
         return (chi, pval, n, p, expected)
+    
+    def goodMatchNegativeBinomialMLE(self, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
+        '''
+        Performs Chi-Squared test that given data comes from negative binomial distribution.
+        Number of bins to sample from poisson=0..bins.
+        
+        New method: use Maximum Likelihood Estimator - derivL(Theta, x) / derivTheta = 0, 
+        No closed form exists, solving iteratively in R.
+        [http://web.njit.edu/all_topics/Prog_Lang_Docs/html/library/MASS/html/fitdistr.html]
+        '''
+        
+        obsArray = []
+        for a,b in enumerate(observed):
+            for i in range(0,b): obsArray.append(a)
+        
+        x = IntVector(obsArray)
+        params = MASS.fitdistr(x, 'negative binomial')
+        
+        n = (params[0][0])
+        p = params[0][0] / (params[0][0] + params[0][1])
+        
+        # expected values - compute N * probability for each port assumed in range 0..bins
+        expected = [(iterations * nbinom.pmf(i, n, p)) for i in range(0, bins)]
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
+        return (chi, pval, n, p, expected, params)
         
     def goodMatchPoisson(self, lmbd, observed, bins, iterations, shift=0, matchBoth=True, verbose=False, wiseBinning=False):
         '''
@@ -2322,6 +2427,10 @@ if __name__ == "__main__":
     parser.add_argument('--benchmark',      help='Algorithm benchmarking for graphs', required=False, default=False, action='store_true')
     parser.add_argument('--exhaust',        help='Pool exhaustion computation', required=False, default=False, action='store_true')
     parser.add_argument('--exhaust_p',      help='Probability of port pool exhaustion to compute with', required=False, default=0.99, type=float)
+    parser.add_argument('--coef',           help='Poisson coefficient finder', required=False, default=False, action='store_true')
+    parser.add_argument('--fine',           help='Fine lambda interval to benchmark', required=False, default=False, action='store_true')
+    parser.add_argument('--samples',        help='Samples in nfdump analysis', required=False, default=100, type=int)
+    parser.add_argument('--maxblock',       help='Maximum number of blocks to collect', required=False, default=100, type=int)
     args = parser.parse_args()
     
     ns = NatSimulation()
@@ -2374,10 +2483,59 @@ if __name__ == "__main__":
     # Computes port distribution function based on netflow network data.
     # 
     if args.nfdistrib:
+        out = None
         if args.nfdump != None:
-            ns.nfdumpDistribution(natA, filename=args.nfdump, homeNet=args.hostnet, filt=args.filter)
+            out = ns.nfdumpDistribution(natA, filename=args.nfdump, homeNet=args.hostnet, filt=args.filter, sampleSize=args.samples, maxBlock=args.maxblock)
         if args.nfdump_sorted != None:
-            ns.nfdumpDistribution(natA, processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter)
+            out = ns.nfdumpDistribution(natA, processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter, sampleSize=args.samples, maxBlock=args.maxblock)
+        
+        #
+        # Data output, each line = one distrib
+        #
+        f = open(args.output, 'a+')
+        for i, res in enumerate(out['sr']):
+            # here we have results of statistical processing of one line
+            distrib = res['distrib']
+            for did, dist in enumerate(distrib):
+                if not (did in [0,4]): continue
+                
+                line = '%d|%d|%01.3f|%01.3f|%d|%01.18f|%03.3f|%03.8f|%s' % \
+                    (i, did, res['ex'], res['var'], res['ssum'],
+                     dist['pval'], dist['chi'], dist['r2'], "|".join([('%03.5f' % x) for x in dist['par']]))
+                     
+                f.write(line + "\n")
+            pass
+        
+        f.close()
+        
+        #
+        # Graph
+        #
+        styles = ['--bx', '-.g2', ':.r', '--|k', ':m+', '--1c']
+        
+        
+        # Process output to nicely looking graph
+        x = np.array(range(0,out['n']))
+        
+        # e,x
+        ex = np.array([d[0] for d in out['sd']])
+        vx = np.array([d[1] for d in out['sd']])
+        plt.plot(x, ex, 'bv', label="E[X]")
+        plt.plot(x, vx, 'r+', label="V[X]")
+        graph(plt)
+        
+        # p-value with critical region
+        pk_p = np.array(out['pk'][0]) # poisson, key
+        pk_n = np.array(out['pk'][4]) # nbin, key
+        pv_p = np.array(out['pv'][0]) # poisson, value
+        pv_n = np.array(out['pv'][4]) # nbin, value
+        plt.plot(pk_p, pv_p, 'go', label="Po")
+        plt.plot(pk_n, pv_n, 'b^', label="NB")
+        plt.axhspan(0.0, 0.05, facecolor='r', alpha=0.5) # p-value reqion
+        graph(plt, y='p-value', loc=-1)
+        
+        
+        
     
     #
     # Simple algorithm simulation on a random sample of NAT data.
@@ -2417,15 +2575,17 @@ if __name__ == "__main__":
         f.write("New start at %s; scanInterval=%d; strategy=%s file=[%s]\n" % (time.time(), ns.portScanInterval, args.strategy, args.output))
         print "Scanning port interval: %d" % ns.portScanInterval
         
-        # COnstruct lambda array to search in
+        # Construct lambda array to search in
         lmbdArr = []
         lmbdArr.extend( [i * 0.001 for i in range(1, 10)] )       # fine tuning
         lmbdArr.extend( [i * 0.01 for i in range(0, 26)] )        # 0.10 .. 0.25 interval scan
-        lmbdArr.extend( [0.03 + i * 0.001 for i in range(0, 50)] )
+        if args.fine: lmbdArr.extend( [0.02 + i * 0.001 for i in range(0, 50)] )
+        
         #
         # benchmarking NAT traversal algorithm on different lambdas
         #
         lmbdArr = list(set(lmbdArr))    # duplicity removal, round on 4 decimal places
+        lmbdArr = filter(lambda x: x >= args.lmbd_start or args.lmbd_start==-1, lmbdArr)
         lmbdArr.sort()                  # sort - better user intuition
         print "="*80
         print "Lambdas that will be benchmarked: \n", (", ".join(['%04.3f' % i for i in lmbdArr]))
@@ -2439,7 +2599,7 @@ if __name__ == "__main__":
             
             ns.lmbd = clmb
             try:
-                if args.strategy == 'poisson':
+                if args.strategy == 'poisson' and args.coef:
                     res = ns.coefFinder(natA, natB, strategies[0], 0.10, 0.1)
                     f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[1])) # python will convert \n to os.linesep
                 else:
