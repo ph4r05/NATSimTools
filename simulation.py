@@ -1241,7 +1241,7 @@ class NatSimulation(object):
             if curBlock >= maxBlockSize: break        
         pass
     
-    def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, drawHist=True, sampleSize = 500, maxBlock=50):
+    def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, drawHist=True, sampleSize = 500, maxBlock=50, skip=0, fileOut=None):
         '''
         Reads nfdump file with given filter and simulates NAT
         
@@ -1277,11 +1277,17 @@ class NatSimulation(object):
         nfgen = self.nfdumpSampleGenerator(natA, nfdumpGenerator, homeNet, self.portScanInterval, 
                                            sampleSize, sampleSkip, 0, maxBlock, activeTimeout)
         
+        f = None
+        if fileOut != None and len(fileOut)>0:
+            f = open(fileOut, 'a+')
+        
         # iterate over new connection count samples
         for samplesRes in nfgen:
             # Process & analyze data
             maxE = max(samplesRes)+1
+            curBlock+=1
             curTestSize = len(samplesRes)
+            if (curBlock-1) < skip: continue
             
             # Convert list of port numbers in each sample to frequency distribution
             distrib = [0] * (maxE)
@@ -1307,10 +1313,29 @@ class NatSimulation(object):
             
             print "=" * 180
             
+            #
+            # Data output, each line = one distrib
+            #
+            if f!=None:
+                for did, dist in enumerate(sres['distrib']):
+                    if not (did in [0,4]): continue
+                    
+                    line = '%d|%d|%01.3f|%01.3f|%d|%01.18f|%03.3f|%03.8f|%s' % \
+                        (curBlock, did, sres['ex'], sres['var'], sres['ssum'],
+                         dist['pval'], dist['chi'], dist['r2'], "|".join([('%03.5f' % x) for x in dist['par']]))
+                         
+                    f.write(line + "\n")
+                    f.flush()
+                pass
+            
             # State reset for next iteration
             curTestSize = 0
-            curBlock+=1
             if curBlock >= maxBlock: break
+        
+        # close file if any
+        if f!=None:
+            try: f.close()
+            except Exception: pass
         
         # force generator de-initialization
         nfdumpObj.deinit()
@@ -2270,8 +2295,13 @@ class NatSimulation(object):
         for a,b in enumerate(observed):
             for i in range(0,b): obsArray.append(a)
         
-        x = IntVector(obsArray)
-        params = MASS.fitdistr(x, 'negative binomial')
+        params = None
+        try:
+            x = IntVector(obsArray)
+            params = MASS.fitdistr(x, 'negative binomial')
+        except Exception, e:
+            print "Problem, exception here", e
+            return (0, 0, 0, 0, [], params)
         
         n = (params[0][0])
         p = params[0][0] / (params[0][0] + params[0][1])
@@ -2431,6 +2461,7 @@ if __name__ == "__main__":
     parser.add_argument('--fine',           help='Fine lambda interval to benchmark', required=False, default=False, action='store_true')
     parser.add_argument('--samples',        help='Samples in nfdump analysis', required=False, default=100, type=int)
     parser.add_argument('--maxblock',       help='Maximum number of blocks to collect', required=False, default=100, type=int)
+    parser.add_argument('--skipblock',      help='How many blocks to skip', required=False, default=0, type=int)
     args = parser.parse_args()
     
     ns = NatSimulation()
@@ -2485,28 +2516,9 @@ if __name__ == "__main__":
     if args.nfdistrib:
         out = None
         if args.nfdump != None:
-            out = ns.nfdumpDistribution(natA, filename=args.nfdump, homeNet=args.hostnet, filt=args.filter, sampleSize=args.samples, maxBlock=args.maxblock)
+            out = ns.nfdumpDistribution(natA, filename=args.nfdump, homeNet=args.hostnet, filt=args.filter, sampleSize=args.samples, maxBlock=args.maxblock, skip=args.skipblock, fileOut=args.output)
         if args.nfdump_sorted != None:
-            out = ns.nfdumpDistribution(natA, processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter, sampleSize=args.samples, maxBlock=args.maxblock)
-        
-        #
-        # Data output, each line = one distrib
-        #
-        f = open(args.output, 'a+')
-        for i, res in enumerate(out['sr']):
-            # here we have results of statistical processing of one line
-            distrib = res['distrib']
-            for did, dist in enumerate(distrib):
-                if not (did in [0,4]): continue
-                
-                line = '%d|%d|%01.3f|%01.3f|%d|%01.18f|%03.3f|%03.8f|%s' % \
-                    (i, did, res['ex'], res['var'], res['ssum'],
-                     dist['pval'], dist['chi'], dist['r2'], "|".join([('%03.5f' % x) for x in dist['par']]))
-                     
-                f.write(line + "\n")
-            pass
-        
-        f.close()
+            out = ns.nfdumpDistribution(natA, processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter, sampleSize=args.samples, maxBlock=args.maxblock, skip=args.skipblock, fileOut=args.output)
         
         #
         # Graph
