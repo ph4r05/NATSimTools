@@ -52,6 +52,16 @@ def fibGenerator():
     while True:
         a, b = b, a + b
         yield a
+
+def poissonProcGenerator(lmbd):
+    '''
+    Generates samples from Poisson NAT (inc +1) process generator
+    '''
+    x = np.random.poisson(lmbd)
+    yield x
+    while True:
+        x += 1 + np.random.poisson(lmbd)
+        yield x
             
 def f7(seq):
     '''
@@ -1241,7 +1251,7 @@ class NatSimulation(object):
             if curBlock >= maxBlockSize: break        
         pass
     
-    def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, drawHist=True, sampleSize = 500, maxBlock=50, skip=0, fileOut=None):
+    def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, drawHist=True, sampleSize = 500, maxBlock=-1, skip=0, fileOut=None):
         '''
         Reads nfdump file with given filter and simulates NAT
         
@@ -1279,7 +1289,7 @@ class NatSimulation(object):
         
         f = None
         if fileOut != None and len(fileOut)>0:
-            f = open(fileOut, 'a+')
+            f = open(fileOut + ("_s%04d_sk%04d_t%04d.txt" % (sampleSize, sampleSkip, self.portScanInterval)), 'a+')
         
         # iterate over new connection count samples
         for samplesRes in nfgen:
@@ -1317,31 +1327,40 @@ class NatSimulation(object):
             # Data output, each line = one distrib
             #
             if f!=None:
+                # Write basic sample info.
+                line = 'S|%d|%01.3f|%01.3f|%d' % (curBlock, sres['ex'], sres['var'], sres['ssum'])
+                f.write(line + "\n")
+                
+                # Distribution fitting and hypothesis testing.
                 for did, dist in enumerate(sres['distrib']):
-                    if not (did in [0,4]): continue
-                    
-                    line = '%d|%d|%01.3f|%01.3f|%d|%01.18f|%03.3f|%03.8f|%s' % \
-                        (curBlock, did, sres['ex'], sres['var'], sres['ssum'],
-                         dist['pval'], dist['chi'], dist['r2'], "|".join([('%03.5f' % x) for x in dist['par']]))
-                         
+                    line = '    D|%d|%01.18f|%03.3f|%03.8f|%s' % \
+                        (did, dist['pval'], dist['chi'], dist['r2'], "|".join([('%03.5f' % x) for x in dist['par']]))
                     f.write(line + "\n")
-                    f.flush()
                 pass
+            
+                # Write whole sample for further statistical processing
+                line = '    R|' + "|".join([('%d' % x) for x in samplesRes])
+                f.write(line + "\n")
+                f.flush()
             
             # State reset for next iteration
             curTestSize = 0
-            if curBlock >= maxBlock: break
+            if maxBlock > 0 and curBlock >= maxBlock: break
         
-        # close file if any
+        #
+        # Final data processing, main loop finished.
+        #
+        
+        # Close protocol file, if any
         if f!=None:
             try: f.close()
             except Exception: pass
         
-        # force generator de-initialization
+        # Force generator de-initialization.
         nfdumpObj.deinit()
         natA.reset()
         
-        # evalueate statistical resutls
+        # Evalueate statistical resutls.
         if (len(statAccum)==0): return
         hypotheses = np.array([0]  * len(statAccum[0]))     # passes/not passed test
         pvals      = [[] for i in range(len(statAccum[0]))] # p-values array
@@ -1615,8 +1634,8 @@ class NatSimulation(object):
             natSamples[1] = natSamples[1][int(math.floor(curSilentB)):]
             
             # set silent period duration to the strategy
-            strategyA.silent(int(curSilentB*T*1.5), 0, lmbd[1])
-            strategyB.silent(0,                 int(curSilentA*T*1.5), lmbd[0])
+            strategyA.silent(int(curSilentB*T), 0, lmbd[1])
+            strategyB.silent(0,                     int(curSilentA*T), lmbd[0])
             
             if not self.compact:
                 print "\n##%03d. Current silent period time: [%03.3f, %03.3f]~[%04d, %04d]; lmbd estimates[%03.3f, %03.3f] TestimateFor[%03.3f, %03.3f] len [%d, %d]" \
@@ -2167,15 +2186,19 @@ class NatSimulation(object):
         
         https://en.wikipedia.org/wiki/Pearson_product-moment_correlation_coefficient 
         '''
-        nmodel = np.array(model)
-        nobs   = np.array(observed)
-        
-        meanMod = nmodel.mean()
-        meanObs = nobs.mean()
-        
-        numerator   = sum((nmodel-meanMod)*(nobs-meanObs)) 
-        denumerator = math.sqrt(sum((nmodel-meanMod)**2)) * math.sqrt(sum((nobs-meanObs)**2))  
-        return (numerator / denumerator) 
+        try:
+            nmodel = np.array(model)
+            nobs   = np.array(observed)
+            
+            meanMod = nmodel.mean()
+            meanObs = nobs.mean()
+            
+            numerator   = sum((nmodel-meanMod)*(nobs-meanObs)) 
+            denumerator = math.sqrt(sum((nmodel-meanMod)**2)) * math.sqrt(sum((nobs-meanObs)**2))  
+            return (numerator / denumerator) 
+        except Exception ,e:
+            print "Problem with computing correlation"
+            return 0.0
         
     def calcPortDistribInfo(self, portDistrib, iterations):
         '''
@@ -2244,7 +2267,7 @@ class NatSimulation(object):
         
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * binom.pmf(i, n, p)) for i in range(0, bins)]
-        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning, ddof=1)
         return (chi, pval, n, p, expected)
     
     def goodMatchNegativeBinomial(self, ex, var, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
@@ -2257,7 +2280,7 @@ class NatSimulation(object):
         # X ~ NBinom(n, p)
         # E[x] = np/(1-p)
         # V[x] = np/(1-p)^2
-        if var == 0 or ex<0: return (0.0, 0.0, 0.0, 0.0)
+        if var == 0 or ex<0: return (0.0, 0.0, 0.0, 0.0, [0 for i in range(0, len(observed))])
         ex  = float(ex)
         var = float(var)
         
@@ -2278,7 +2301,7 @@ class NatSimulation(object):
         
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * nbinom.pmf(i, n, p)) for i in range(0, bins)]
-        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning, ddof=1)
         return (chi, pval, n, p, expected)
     
     def goodMatchNegativeBinomialMLE(self, observed, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
@@ -2301,14 +2324,14 @@ class NatSimulation(object):
             params = MASS.fitdistr(x, 'negative binomial')
         except Exception, e:
             print "Problem, exception here", e
-            return (0, 0, 0, 0, [], params)
+            return (0, 0, 0, 0, [0 for i in observed], params)
         
         n = (params[0][0])
         p = params[0][0] / (params[0][0] + params[0][1])
         
         # expected values - compute N * probability for each port assumed in range 0..bins
         expected = [(iterations * nbinom.pmf(i, n, p)) for i in range(0, bins)]
-        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
+        (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning, ddof=1)
         return (chi, pval, n, p, expected, params)
         
     def goodMatchPoisson(self, lmbd, observed, bins, iterations, shift=0, matchBoth=True, verbose=False, wiseBinning=False):
@@ -2326,7 +2349,7 @@ class NatSimulation(object):
         (chi, pval) = self.goodMatchDistribution(observed, expected, bins, iterations, matchBoth, verbose, wiseBinning)
         return (chi, pval, expected) 
     
-    def goodMatchDistribution(self, observed, expected, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False):
+    def goodMatchDistribution(self, observed, expected, bins, iterations, matchBoth=True, verbose=False, wiseBinning=False, ddof=0):
         '''
         Performs Chi-Squared test that given data comes from a given distribution.
         Number of bins to sample from distribution=0..bins
@@ -2362,7 +2385,7 @@ class NatSimulation(object):
             print "observed: \n", obsTest
         
         # perform chi-squared test on distribution
-        return chisquare(np.array(obsTest), f_exp=np.array(expTest))
+        return chisquare(np.array(obsTest), f_exp=np.array(expTest), ddof=0)
 
     def unimodalLowIdx(self, observed, limit):
         '''
@@ -2425,6 +2448,153 @@ class NatSimulation(object):
         #print "exp:", expTest
         return (obsTest, expTest)
     
+    def myProcEstimator(self, lmbd=-1, T=-1):
+        '''
+        Conditional estimator assuming we weren't lucky in the previous guess
+        '''
+        
+        if lmbd == -1: lmbd = self.lmbd
+        if T == -1: T = self.portScanInterval
+        
+        # First value of selection is clear - expected value for distribution
+        g = [round(1 + lmbd*T)]
+        
+        # Probability distribution on previous port number
+        # First guess is poisson distribution shifted to the right
+        f1 = [0.0]
+        f1.extend([poisson.pmf(i, lmbd*T) for i in range(0, self.errors)])  
+        prevDistrib = dict(zip(range(len(f1)), f1)) 
+        for r in range(1, self.errors):
+            print "="*120
+            print "Round %04d; prev guess %d" % (r, g[r-1])
+            
+            #
+            # Compute current probability distribution
+            # conditionally - assume previous tip failed.
+            #
+            
+            # Compute previous distribution, but conditioned on the last choice
+            if not (g[r-1] in prevDistrib): prevDistrib[g[r-1]] = 0.0 # set to zero in p. distrib if does not exist
+            prevDistribCond = dict( [(i, prevDistrib[i] / (1.0 - prevDistrib[g[r-1]])) if i!=g[r-1] else (i, 0.0) for i in prevDistrib.keys()] )
+            
+            # Sanity check - sum previous distribution, should be close to 1
+            prevSum = sum([prevDistribCond[i] for i in prevDistribCond])
+            print "Sum on condition: ", prevSum
+            
+            # Compute current conditional distribution
+            # P(C_i = x) = \sum_{y} P(C_i = x | C_{i-1} = y) * P(C_{i-1} = y)
+            # P(C_i = x) = \sum_{y} \sum_{y} P(C_i = x | C_{i-1} = y) * prevDistribCond(y)
+            # for all x, over all y.
+            curDistrib = {}
+            maxIdx = -1
+            zero = 0
+            for x in range(2*self.errors):
+                #print "  x:", x
+                # Iterative computing for current x
+                #print "x: ", x
+                px = 0.0 
+                
+                # Sum over all y values. Can ignore y such that x<=y
+                # because C_i = C_{i-1} + 1 + Po(T * lmbd)
+                # thus C_i > C_{i-1}
+                for y in range(0, x):
+                    # Skip values not in previous distrib function - would be zero.
+                    if not (y in prevDistribCond): continue
+                    if prevDistribCond[y] == 0.0: continue
+                    
+                    # Compute P(C_i = x | C_{i-1} = y) * P(C_{i-1} = y)
+                    cx = poisson.pmf(x-y-1, lmbd*T) * prevDistribCond[y]
+                    if cx == 0.0: continue
+                    
+                    # Only if non-zero
+                    px += cx 
+                    #print "    -> P(C_%03d = %03d | C_%03d = %03d) * P(C_%03d = %03d) = %02.18f" % (r, x, r-1, y, r-1, y, cx)
+                
+                curDistrib[x] = px
+                #print "  P(C_%03d = %03d) = %02.18f\n" % (r, x, px)
+                
+                if x > (max(g)*2) and px==0.0:
+                    zero+=1
+                
+                if zero>=10:
+                    #print "   break limit 2"
+                    break
+                
+                if x > ((r * (1+lmbd*T))*lmbd*T*10): 
+                    #print "   break limit 1"
+                    break
+            # End of for x loop
+            pass 
+        
+            # Now we have probability distrib on C_r.
+            # Since duplicities are not allowed, remove values from g
+            # from probability distribution
+            for cg in g:
+                print " removing cg=%d from distrib" % cg
+                if not (cg in curDistrib): curDistrib[cg] = 0.0 # set to zero in p. distrib if does not exist
+                curDistrib = dict( [(i, curDistrib[i] / (1.0 - curDistrib[cg])) if i!=cg else (i, 0.0) for i in curDistrib.keys()] )
+                
+            # Self-check
+            prevSum = sum([curDistrib[i] for i in curDistrib])
+            print "Sum on condition: ", prevSum
+                
+            # Find maximal element in prob. distribution
+            for x in curDistrib:
+                if maxIdx==-1 or curDistrib[x] > curDistrib[maxIdx]: maxIdx = x
+            
+            print "Move[%d] = %d" % (r, maxIdx) 
+            
+            # Select new move - maximizing probability distribution
+            g.append(maxIdx)
+            
+            # curdistrib -> prevDistrib
+            prevDistrib = curDistrib
+            
+        pass
+        
+        return g
+        
+    
+    def processEstimator(self, lmbd=-1, T=-1, rounds=1000):
+        '''
+        Simulates estimator of the NAT poisson process
+        '''
+        
+        if lmbd == -1: lmbd = self.lmbd
+        if T == -1: T = self.portScanInterval
+        
+        matches = [[], []]
+        for r in range(0, rounds):
+            natSamples = [round(x) for x in np.random.poisson(lmbd*T, self.errors)]
+            procList   = [natSamples[0] + 1]
+            for i in range(1, self.errors): procList.append(procList[i-1] + 1 + natSamples[i])
+            
+            #
+            # Test expected value estimator
+            #
+            exVal = [round(i * (1 + (lmbd)*T)) for i in range(1, self.errors+1)]
+            exMatch = list(set(procList) & set(exVal))
+            print "Round %04d; EX matched=%d; " % (r, len(exMatch)) #, "matches: ", exMatch
+            
+            #
+            # Test sampling value estimator
+            #
+            natSamples2 = [round(x) for x in np.random.poisson(lmbd*T, self.errors)]
+            procList2   = [natSamples[0] + 1]
+            for i in range(1, self.errors): procList2.append(procList2[i-1] + 1 + natSamples2[i])
+            samMatch = list(set(procList) & set(procList2))
+            print "Round %04d; Sampling matched=%d; " % (r, len(samMatch)) #, "matches: ", samMatch
+        
+            #
+            # Conditional estimator
+            # 
+            #glist = self.myProcEstimator(lmbd, T)
+            glist = [i*3 for i in range(0, self.errors)]
+            gMatch = list(set(procList) & set(glist))
+            gMatch.sort()
+            print "Round %04d; Conditional matched=%d; " % (r, len(gMatch)) #, "matches: ", gMatch
+            
+    
     @staticmethod
     def pearson(vect, y):
         ss_err=(vect**2).sum()
@@ -2456,11 +2626,12 @@ if __name__ == "__main__":
     parser.add_argument('--nfsim',          help='Starts traversal algorithm simulation with netflow data', required=False, default=False, action='store_true')
     parser.add_argument('--benchmark',      help='Algorithm benchmarking for graphs', required=False, default=False, action='store_true')
     parser.add_argument('--exhaust',        help='Pool exhaustion computation', required=False, default=False, action='store_true')
+    parser.add_argument('--proc',           help='Simulate poisson process and estimators', required=False, default=False, action='store_true')
     parser.add_argument('--exhaust_p',      help='Probability of port pool exhaustion to compute with', required=False, default=0.99, type=float)
     parser.add_argument('--coef',           help='Poisson coefficient finder', required=False, default=False, action='store_true')
     parser.add_argument('--fine',           help='Fine lambda interval to benchmark', required=False, default=False, action='store_true')
     parser.add_argument('--samples',        help='Samples in nfdump analysis', required=False, default=100, type=int)
-    parser.add_argument('--maxblock',       help='Maximum number of blocks to collect', required=False, default=100, type=int)
+    parser.add_argument('--maxblock',       help='Maximum number of blocks to collect', required=False, default=-1, type=int)
     parser.add_argument('--skipblock',      help='How many blocks to skip', required=False, default=0, type=int)
     args = parser.parse_args()
     
@@ -2572,6 +2743,13 @@ if __name__ == "__main__":
     if args.pdistrib:
         ns.portDistributionFunction(args.lmbd, args.space, range(1,180), [])
         print "Port distribution done..."
+    
+    #
+    # Poisson process estimators simulation
+    #
+    if args.proc:
+        ns.processEstimator()
+        print "Process estimation done..."
     
     #
     # Algorithm benchmarking on different lambda to test performance in different environment.
