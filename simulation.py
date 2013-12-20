@@ -32,6 +32,7 @@ import gc
 # Multiple plots
 from mpl_toolkits.axes_grid1 import host_subplot
 import mpl_toolkits.axisartist as AA
+import pylab as P
 
 # MLE distribution fitting with RPy - python binding for R
 from rpy2.robjects import r
@@ -41,6 +42,12 @@ from rpy2.robjects.packages import importr
 # Load the MASS library for distribution fitting
 # See more at: http://thomas-cokelaer.info/blog/2011/08/fitting-distribution-by-combing-r-and-python/#sthash.TiVb9HpI.dpuf 
 MASS = importr('MASS') 
+
+def coe(x):
+    return 1.0 / (0.163321 * math.log(64.2568 * x)) 
+
+def charproc(i, m):
+    return chr(  int(ord('a') + (  (float(i)/m)  *  ((ord('z')-ord('a')))   ))    )
 
 # Fibonacchi list generator
 def fibGenerator():
@@ -257,6 +264,7 @@ class SymmetricNat(Nat):
             
         # check if pool is exhausted - all ports are allocated currently
         if tries >= self.poolLen or port==-1:
+            print "Port pool exhausted"
             raise Exception("Port pool exhausted")
         # reflect to internal NAT state - move iterator
         if peek==False:
@@ -438,6 +446,7 @@ class I2JStragegy(Strategy):
         c = 0
         if lmbd >=  0.035: c=-10000.0*lmbd*lmbd + 950.0*lmbd - 21.0 
         if lmbd >= 0.05:   c=2
+        
         self.startPos=[int(0 * lmbd * time1), int(0 * lmbd * time2)]
         #self.startPos=[NatSimulation.poisson(lmbd, time1), NatSimulation.poisson(lmbd, time2)]
         return self.startPos
@@ -458,6 +467,7 @@ class SimpleStrategy(Strategy):
     '''
     startPos=[0,0]
     b = []
+    ln = 0
     def init(self, params=None):
         pass
     def reset(self, nats=[], sim=None, params=[]):
@@ -467,6 +477,7 @@ class SimpleStrategy(Strategy):
             x = probRound(x)    # probabilistic rounding
             #x = round(x)
             self.b.append(x)
+        self.ln = len(self.b)
         
     def silent(self,  time1, time2, lmbd):
         self.startPos=[int(lmbd * time1), int(lmbd * time2)]
@@ -474,8 +485,8 @@ class SimpleStrategy(Strategy):
         return self.startPos
         
     def next(self, party, step):
-        if party==0: return (0, int(round(self.startPos[0]+self.b[step])))
-        if party==1: return (0, int(round(self.startPos[1]+self.b[step])))
+        if party==0: return (0, int(round(self.startPos[0]+self.b[min(step, self.ln-1)])))
+        if party==1: return (0, int(round(self.startPos[1]+self.b[min(step, self.ln-1)])))
         
 class FiboStrategy(Strategy):
     '''
@@ -612,15 +623,19 @@ class PoissonStrategy(Strategy):
         #return (4.43727 * math.exp(-2.156 * x))
         #return -0.928467 * math.log(0.255879 * x)       # this formula is OK for lambda [0.01, 0.07], t=10
         #return 1.0 / (0.161918 * math.log(65.7525 * x)) # OK for [0.04 , 0.15], t=10
-        
-        # this works pretty well
-        return 1.0 / (0.163321 * math.log(64.2568 * x))  # OK for [0.04 , 0.15], t=10
-    
         # experimental
         #return 1.0 / (0.165     * math.log(64 * x))  # OK for [0.04 , 0.15], t=10
         #return 6.18 / (math.log(x) + 4.28)  # OK for [0.04 , 0.15], t=10
-        
-        # very good fit for low intervals
+    
+        #
+        # Usable functions below.
+        # 
+            
+        # Alternative #1 - works good.
+        return 1.0 / (0.163321 * math.log(64.2568 * x))  # OK for [0.04 , 0.15], t=10
+    
+        # Alternative #2 - quartic interpolation.
+        # Very good fit for low intervals.
         return 1.0 / (0.172876+1.28162*x-1.41256*x*x+0.825093*x*x*x-0.184726*x*x*x*x)
         
     def genPart(self, party):
@@ -630,16 +645,29 @@ class PoissonStrategy(Strategy):
         # port scan interval from simulation
         t = self.sim.portScanInterval if self.sim != None else 10
         
+        x    = 0
         b    = []             # local array
         seen = set()          # duplicate check
         seen_add = seen.add
         
         for step in range(0, 3001):
-            #x = int(  np.random.poisson(lmbd * t * (1+step*self.coe(lmbd*t)))  )
-            x = int(  np.random.poisson(lmbd * t * (1+step*self.coef))  )
-            #x = int(np.random.poisson(step * (1 + lmbd * 10)))
+            x = int(  np.random.poisson(lmbd * t * (1.0+step*self.coe(lmbd*t)))  )
+            #x = int(  np.random.poisson(lmbd * t * (1.0+step*self.coef))  )
+            #x = round(  np.random.poisson(float(step) * (1.0 + lmbd*t))  )
+            
+            #if party==0:
+            #    x = round(step * (1 + lmbd*t))
+            #if party==1:
+            #    x = round(step * (1 + lmbd*t))
+            
+            # If unique element -> add to the b[]
+            # Otherwise skip this <step> iteration - specialty. For different runs
+            # different steps can be skipped. 
             if self.dupl or (x not in seen and not seen_add(x)): 
                 b.append(x)
+                if len(b) > 1100: break
+            #b.append(x)
+        #b = f7(b)
         return b
                 
     def gen(self):
@@ -659,31 +687,31 @@ class PoissonStrategy(Strategy):
         #self.startPos[party] += 1+NatSimulation.poisson(self.lmbd, 10)#*(1+step*0.77))
         #return (0, int(self.startPos[party]))
 
-def getStrategy(desc):
+def getStrategy(desc, verbose=0):
     '''
     Returns strategy according to string identifier
     '''
     strategy = PoissonStrategy()
     if desc == 'i2j':
-        print "I2J Strategy: "
+        if verbose>0: print "I2J Strategy: "
         strategy = I2JStragegy()
     elif desc == 'ij':
-        print "IJ strategy"
+        if verbose>0: print "IJ strategy"
         strategy = IJStragegy()
     elif desc == 'fibo':
-        print "Fibonacci strategy"
+        if verbose>0: print "Fibonacci strategy"
         strategy = FiboStrategy()
     elif desc == 'their':
-        print "Their strategy"
+        if verbose>0: print "Their strategy"
         strategy = TheirStragegy()
     elif desc == 'poisson':
-        print "Poisson strategy"    
+        if verbose>0: print "Poisson strategy"    
         strategy  = PoissonStrategy()
     elif desc == 'binom':
-        print "Binomial strategy"    
+        if verbose>0: print "Binomial strategy"    
         strategy  = BinomialStrategy()
     elif desc == 'simple':
-        print "Simple strategy"    
+        if verbose>0: print "Simple strategy"    
         strategy  = SimpleStrategy()
     
     return strategy
@@ -838,7 +866,6 @@ class NfdumpReader(NfdumpAbstract):
         if self.once == True: raise Exception('Generator was not de-initialized, may be still running...')
         self.fo   = open(filename, "r+")
         self.once = True
-        print "Data loaded, going to process output..."
     
     def __enter__(self):
         return self
@@ -1180,7 +1207,7 @@ class NatSimulation(object):
             fromHome = srcIP.startswith(homeNet)    # Is connection made from our network?
             
             # Skiping on record basis
-            if recEachSkip!=0:
+            if recEachSkip >= 1:
                 recCurSkipCnt+=1
                 if recCurSkipCnt <= recEachSkip: continue
                 # No skip -> reset counter
@@ -1214,7 +1241,7 @@ class NatSimulation(object):
                 lastSampleTime = startUtc/(T)
                 
                 # collected samples
-                curTestSize+=1
+                curTestSize = len(samplesRes)
             pass
             
             # Allocate to NAT
@@ -1248,7 +1275,9 @@ class NatSimulation(object):
             natA.reset()
             curBlock+=1
             
-            if curBlock >= maxBlockSize: break        
+            if maxBlockSize > 0 and curBlock >= maxBlockSize: break
+            
+        yield samplesRes
         pass
     
     def nfdumpDistribution(self, natA, filename=None, processedNfdump=None, homeNet='', filt=None, drawHist=True, sampleSize = 500, maxBlock=-1, skip=0, fileOut=None):
@@ -1482,6 +1511,8 @@ class NatSimulation(object):
         getTime = lambda: int(round(time.time() * 1000))
         simStart = getTime()
         
+        resM = []
+        
         successAcc = [0,0]              # accumulator for steps needed to connect if successfully
         realRounds = self.simulationRounds
         for sn in range(0, self.simulationRounds):
@@ -1526,12 +1557,20 @@ class NatSimulation(object):
             if (len(res) == 0): 
                 continue
             
+            #resM.extend([i for i,j in res])
+            resM.append(res[0][0])
+            
             successCnt += 1.0
             successAcc[0] += mapA[0][res[0][0]]
             successAcc[1] += mapA[1][res[0][1]]
         
         simEnd = getTime()
         simTotal = simEnd - simStart    
+        
+        P.grid(True)
+        P.Figure()
+        P.hist(resM, max(resM), normed=0, histtype='bar')
+        graph(plt)
             
         # Report results after simulation is done
         print "\nSuccess count: %02.3f ; cnt=%03d; lmbd=%01.3f; scanInterval=%04d ms; base sleep=%04d; average steps: %04.3f %04.3f; time elapsed=%04.3f s" % \
@@ -1549,7 +1588,7 @@ class NatSimulation(object):
                 successAcc[0] / successCnt if successCnt > 0 else 0,
                 successAcc[1] / successCnt if successCnt > 0 else 0,)
     
-    def nfSimulation(self, natA, natB, strategyA, strategyB, filename=None, processedNfdump=None, homeNet='', filt=None):
+    def nfSimulation(self, natA, natB, strategyA, strategyB, filename=None, processedNfdump=None, homeNet='', filt=None, recEachSkip=0, maxBlock=-1):
         '''
         Simulating NAT for traversal algorithms with netflow data as network load.
         '''
@@ -1561,7 +1600,6 @@ class NatSimulation(object):
         sampleSkip = 0
         curTestSize=0
         sn=0
-        maxBlock=100
         statAccum=[]
         
         T = self.portScanInterval   # port scan interval for nfdump generator, strategies, ... 
@@ -1589,14 +1627,16 @@ class NatSimulation(object):
         
         # generates samples of NAT process w.r.t. new connections.
         nfgen = self.nfdumpSampleGenerator(natA, nfdumpGenerator, homeNet, T, 
-                                           sampleSize, sampleSkip, 0, maxBlock, activeTimeout)
-        
+                                           sampleSize=sampleSize, recStartSkip=sampleSkip, 
+                                           recEachSkip=recEachSkip, maxBlockSize=maxBlock, activeTimeout=activeTimeout)
+        samplesMean = []
         while True:
             # sample NAT connections from Nfdump files
             natSamples = [[], []]
             try:
                 natSamples[0] = next(nfgen)
                 natSamples[1] = next(nfgen)
+                if len(natSamples[0]) < sampleSize or len(natSamples[1]) < sampleSize: continue
             except Exception:
                 break
             
@@ -1608,11 +1648,16 @@ class NatSimulation(object):
             strategyA.reset(nats, self)
             strategyB.reset(nats, self)
             
+            # Lambda statistics
+            samplesMean.append(np.mean(  [ (i / float(T)) for i in natSamples[0] ]  ))
+            samplesMean.append(np.mean(  [ (i / float(T)) for i in natSamples[1] ]  ))
+            
             #
             # Measure lambda by using some nat samples for it.
             # lmbd[0] = lambda for A network, thus interesting for B
             #
-            lmbd = [ (sum(natSamples[party][0:lambdaSamples]) / float(lambdaSamples * T)) for party in [0,1] ]
+            lmbd    = [ (sum(natSamples[party][0:lambdaSamples]) / float(lambdaSamples          * T)) for party in [0,1] ]
+            lmbdAvg = [ (sum(natSamples[party])                  / float(len(natSamples[party]) * T)) for party in [0,1] ] # average lambda, just info for user 
             natSamples[0] = natSamples[0][lambdaSamples:]
             natSamples[1] = natSamples[1][lambdaSamples:]
             
@@ -1638,8 +1683,16 @@ class NatSimulation(object):
             strategyB.silent(0,                     int(curSilentA*T), lmbd[0])
             
             if not self.compact:
-                print "\n##%03d. Current silent period time: [%03.3f, %03.3f]~[%04d, %04d]; lmbd estimates[%03.3f, %03.3f] TestimateFor[%03.3f, %03.3f] len [%d, %d]" \
-                    % (sn, curSilentA*T, curSilentB*T, kA, kB, lmbd[0], lmbd[1], strategyA.startPos[0], strategyB.startPos[1], len(natSamples[0]), len(natSamples[1]))
+                print "\n##%03d. C. s. period: [%03.3f, %03.3f]~[%04d, %04d]; lmbd est [%03.3f, %03.3f] s.p. est. [%03.3f, %03.3f] len [%d, %d] lmbdAvg [%03.3f, %03.3f]" \
+                    % (sn, 
+                       curSilentA*T, curSilentB*T, 
+                       kA, kB, 
+                       lmbd[0], lmbd[1], 
+                       strategyA.startPos[0], strategyB.startPos[1], 
+                       len(natSamples[0]), len(natSamples[1]),
+                       lmbdAvg[0], lmbdAvg[1]
+                       )
+                print strategyA
             
             # do the simulation round 
             (res, portsA, mapA, scanA, totalLagA, stepMap) = self.simulationCore(natSamples, strategies, nats, stopOnFirstMatch)
@@ -1653,7 +1706,7 @@ class NatSimulation(object):
             successAcc[1] += mapA[1][res[0][1]]
             
             # Stop early if poor performance
-            if False and sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast:
+            if False and (sn == self.simulationRoundsFast and 2.0*successCnt < self.simulationRoundsFast):
                 sys.stdout.write('Z')
                 sys.stdout.flush()
                 realRounds = sn+1
@@ -1676,7 +1729,8 @@ class NatSimulation(object):
              successAcc[0] / successCnt if successCnt > 0 else 0,
              successAcc[1] / successCnt if successCnt > 0 else 0,
              simTotal/1000.0)
-        
+            
+        print "Lambda mean(mean(lmbd)) = ", np.mean(samplesMean), "; median(mean(lmbd)) = ", np.median(samplesMean), "; var(mean(lmbd)) = ", np.var(samplesMean) 
         return (successCnt / realRounds    if realRounds > 0 else 0, 
                 successCnt, 
                 successAcc[0] / successCnt if successCnt > 0 else 0,
@@ -2456,11 +2510,11 @@ class NatSimulation(object):
         if lmbd == -1: lmbd = self.lmbd
         if T == -1: T = self.portScanInterval
         
-        # First value of selection is clear - expected value for distribution
+        # First value of selection is clear - expected value for distribution for C_i
         g = [round(1 + lmbd*T)]
         
         # Probability distribution on previous port number
-        # First guess is poisson distribution shifted to the right
+        # First guess is poisson distribution shifted to the right: f(x - 1, lmbd * T)
         f1 = [0.0]
         f1.extend([poisson.pmf(i, lmbd*T) for i in range(0, self.errors)])  
         prevDistrib = dict(zip(range(len(f1)), f1)) 
@@ -2474,6 +2528,8 @@ class NatSimulation(object):
             #
             
             # Compute previous distribution, but conditioned on the last choice
+            # f(g[r-1]) = 0.
+            # Done by scaling - multiply each remaining element by 1 / (1 - f(g[r-1]))
             if not (g[r-1] in prevDistrib): prevDistrib[g[r-1]] = 0.0 # set to zero in p. distrib if does not exist
             prevDistribCond = dict( [(i, prevDistrib[i] / (1.0 - prevDistrib[g[r-1]])) if i!=g[r-1] else (i, 0.0) for i in prevDistrib.keys()] )
             
@@ -2481,7 +2537,7 @@ class NatSimulation(object):
             prevSum = sum([prevDistribCond[i] for i in prevDistribCond])
             print "Sum on condition: ", prevSum
             
-            # Compute current conditional distribution
+            # Compute current conditional distribution P(C_i = x) with law of total probability:
             # P(C_i = x) = \sum_{y} P(C_i = x | C_{i-1} = y) * P(C_{i-1} = y)
             # P(C_i = x) = \sum_{y} \sum_{y} P(C_i = x | C_{i-1} = y) * prevDistribCond(y)
             # for all x, over all y.
@@ -2549,13 +2605,9 @@ class NatSimulation(object):
             
             # curdistrib -> prevDistrib
             prevDistrib = curDistrib
-            
-        pass
-        
         return g
         
-    
-    def processEstimator(self, lmbd=-1, T=-1, rounds=1000):
+    def processEstimator(self, lmbd=-1, T=-1, rounds=100):
         '''
         Simulates estimator of the NAT poisson process
         '''
@@ -2563,8 +2615,31 @@ class NatSimulation(object):
         if lmbd == -1: lmbd = self.lmbd
         if T == -1: T = self.portScanInterval
         
-        matches = [[], []]
+        matchesd = [[], [], [], [], [], [], []]
+        matchesr = [[], [], [], [], [], [], []]
+        matched = [0, 0, 0, 0, 0, 0, 0]
+        matcher = [0, 0, 0, 0, 0, 0, 0]
+        
+        matchN = [[], [], [], [], [], [], []]
+        matchI = [[], [], [], [], [], [], []]
+        B = []
+        
+        x    = 0
+        b    = []             # local array
+        seen = set()          # duplicate check
+        seen_add = seen.add
+        for step in range(0, 3001):
+            #for kk in range(0,100):
+                x = int(  np.random.poisson(lmbd * T * (1+step* 1.5 )))# coe(lmbd*T)))  )
+                if x not in seen and not seen_add(x): 
+                    b.append(x)
+                    if len(b)>1000: break
+                        
         for r in range(0, rounds):
+            #print "="*80
+            sys.stdout.write( charproc(r, rounds) )
+            sys.stdout.flush()
+            
             natSamples = [round(x) for x in np.random.poisson(lmbd*T, self.errors)]
             procList   = [natSamples[0] + 1]
             for i in range(1, self.errors): procList.append(procList[i-1] + 1 + natSamples[i])
@@ -2574,27 +2649,116 @@ class NatSimulation(object):
             #
             exVal = [round(i * (1 + (lmbd)*T)) for i in range(1, self.errors+1)]
             exMatch = list(set(procList) & set(exVal))
-            print "Round %04d; EX matched=%d; " % (r, len(exMatch)) #, "matches: ", exMatch
+            # In order test
+            exInOrd = [ j for i,j in enumerate(procList) if j==exVal[i] ]
+            # Res
+            matchN[0].extend(exMatch)
+            matchI[0].extend(exInOrd)
+            if len(exMatch)>0: 
+                matched[0] += 1
+                matchesd[0].append(len(exMatch))
+            if len(exInOrd)>0: 
+                matcher[0] += 1
+                matchesr[0].append(len(exInOrd))
+            #print "Round %04d; EX matched=%03d; total=%1.5f inOrd=%03d" % (r, len(exMatch), len(exMatch)/float(self.errors), exInOrd) #, "matches: ", exMatch
             
             #
             # Test sampling value estimator
             #
             natSamples2 = [round(x) for x in np.random.poisson(lmbd*T, self.errors)]
-            procList2   = [natSamples[0] + 1]
+            procList2   = [natSamples2[0] + 1]
             for i in range(1, self.errors): procList2.append(procList2[i-1] + 1 + natSamples2[i])
             samMatch = list(set(procList) & set(procList2))
-            print "Round %04d; Sampling matched=%d; " % (r, len(samMatch)) #, "matches: ", samMatch
+            
+            # In order test
+            samInOrd = [ j for i,j in enumerate(procList) if j==procList2[i] ]
+            matchN[1].extend(samMatch)
+            matchI[1].extend(samInOrd)
+            if len(samMatch)>0:
+                matched[1] += 1
+                matchesd[1].append(len(samMatch))
+            if len(samInOrd)>0: 
+                matcher[1] += 1
+                matchesr[1].append(len(samInOrd))
+            #print "Round %04d; Sa matched=%03d; total=%1.5f inOrd=%03d" % (r, len(samMatch), len(samMatch)/float(self.errors), samInOrd) #, "matches: ", samMatch
+            
+            #
+            # Test sampling value estimator - coef
+            #
+            #x    = 0
+            #b    = []             # local array
+            seen = set()          # duplicate check
+            seen_add = seen.add
+            for step in range(0, 0):#3001):
+                #for kk in range(0,100):
+                    x = int(  np.random.poisson(lmbd * T * (1+step* 1.5 )))# coe(lmbd*T)))  )
+                    if x not in seen and not seen_add(x): 
+                        b.append(x)
+                        if len(b)>1000: break
+            #B.extend(b)
+            #if r<10: print b[0:20]
+            bMatch = list(set(procList) & set(b))
+            
+            # In order test
+            bInOrd = [ j for i,j in enumerate(procList) if j==b[i] ]
+            
+            matchN[2].extend(bMatch)
+            matchI[2].extend(bInOrd)
+            if len(bMatch)>0: 
+                matched[2] += 1
+                matchesd[2].append(len(bMatch))
+            if len(bInOrd) >0: 
+                matcher[2] += 1
+                matchesr[2].append(len(bInOrd))
+            #print "Round %04d; Sx matched=%03d; total=%1.5f inOrd=%03d" % (r, len(bMatch), len(bMatch)/float(self.errors), bInOrd) #, "matches: ", samMatch
         
             #
             # Conditional estimator
             # 
             #glist = self.myProcEstimator(lmbd, T)
-            glist = [i*3 for i in range(0, self.errors)]
+            glist = [i*2 for i in range(0, self.errors)]
             gMatch = list(set(procList) & set(glist))
             gMatch.sort()
-            print "Round %04d; Conditional matched=%d; " % (r, len(gMatch)) #, "matches: ", gMatch
+            # In order test
+            gInOrd = [ j for i,j in enumerate(procList) if j==glist[i] ]
+            matchN[3].extend(gMatch)
+            matchI[3].extend(gInOrd)
+            if len(gMatch)>0: 
+                matched[3] += 1
+                matchesd[3].append(len(gMatch))
+            if len(gInOrd)>0: 
+                matcher[3] += 1
+                matchesr[3].append(len(gInOrd))
+            #print "Round %04d; Co matched=%03d; total=%1.5f inOrd=%03d" % (r, len(gMatch), len(gMatch)/float(self.errors), gInOrd) #, "matches: ", gMatch
+        
+        print "Coefficient:", coe(lmbd*T)
+        print "Total"
+        print [(i, np.median(k)) for i,k in enumerate(matchesd) if len(k)>0]
+        print matched
+        
+        print "In order"
+        print [(i, np.median(k)) for i,k in enumerate(matchesr) if len(k)>0]
+        print matcher
+        
+        #print "Bgraph"
+        #P.grid(True)
+        #P.Figure()
+        #P.hist(B, 1000, normed=0, histtype='bar')
+        #graph(plt)
             
-    
+        for i in range(0,0):
+            print "I=%d; total match" % i
+            P.grid(True)
+            P.Figure()
+            P.hist(matchN[i], 2000, normed=0, histtype='bar')
+            graph(plt)
+            
+            print "I=%d; in-order match" % i
+            P.grid(True)
+            P.Figure()
+            P.hist(matchI[i], 2000, normed=0, histtype='bar')
+            graph(plt)
+            
     @staticmethod
     def pearson(vect, y):
         ss_err=(vect**2).sum()
@@ -2619,11 +2783,13 @@ if __name__ == "__main__":
     parser.add_argument('-m','--nfdump_sorted',help='NFdump sorted file', required=False, default=None)
     parser.add_argument('-f','--filter',    help='NFdump filter', required=False, default=None)
     parser.add_argument('-g','--hostnet',   help='NFdump host address', required=False, default="147.250.")
+    parser.add_argument('-v','--verbose',   help='Verbosity level', required=False, default=0, type=int)
     parser.add_argument('--lmbd',           help='Default Poisson lambda for simulations', required=False, type=float, default=0.1)
     parser.add_argument('--pdistrib',       help='Switch to compute port distribution function', required=False, default=False, action='store_true')
     parser.add_argument('--nfdistrib',      help='Switch to compute netflow port distribution function', required=False, default=False, action='store_true')
     parser.add_argument('--sim',            help='Starts traversal algorithm simulation', required=False, default=False, action='store_true')
     parser.add_argument('--nfsim',          help='Starts traversal algorithm simulation with netflow data', required=False, default=False, action='store_true')
+    parser.add_argument('--nfbench',        help='Benchmark algorithm simulation with netflow data', required=False, default=False, action='store_true')
     parser.add_argument('--benchmark',      help='Algorithm benchmarking for graphs', required=False, default=False, action='store_true')
     parser.add_argument('--exhaust',        help='Pool exhaustion computation', required=False, default=False, action='store_true')
     parser.add_argument('--proc',           help='Simulate poisson process and estimators', required=False, default=False, action='store_true')
@@ -2633,6 +2799,8 @@ if __name__ == "__main__":
     parser.add_argument('--samples',        help='Samples in nfdump analysis', required=False, default=100, type=int)
     parser.add_argument('--maxblock',       help='Maximum number of blocks to collect', required=False, default=-1, type=int)
     parser.add_argument('--skipblock',      help='How many blocks to skip', required=False, default=0, type=int)
+    parser.add_argument('--eachskip',       help='Records skipped between samples', required=False, default=0.0, type=float)
+    
     args = parser.parse_args()
     
     ns = NatSimulation()
@@ -2659,8 +2827,8 @@ if __name__ == "__main__":
     ns.simulationRounds = args.rounds
     ns.errors = args.errors
     ns.portScanInterval = args.space
-    ns.silentPeriodBase=1000
-    ns.silentPeriodlmbd=100
+    ns.silentPeriodBase=500
+    ns.silentPeriodlmbd=10
     
     #
     # Port pool exhaustion computation
@@ -2731,11 +2899,11 @@ if __name__ == "__main__":
     # Simple algorithm simulation on a random sample of NAT data.
     #
     if args.nfsim:
-        ns.compact = False
+        ns.compact = args.verbose == 0
         if args.nfdump != None:
-            ns.nfSimulation(natA, natB, strategies[0], strategies[1], filename=args.nfdump, homeNet=args.hostnet, filt=args.filter)
+            ns.nfSimulation(natA, natB, strategies[0], strategies[1], filename=args.nfdump, homeNet=args.hostnet, filt=args.filter, recEachSkip=args.eachskip, maxBlock=args.maxblock)
         if args.nfdump_sorted != None:
-            ns.nfSimulation(natA, natB, strategies[0], strategies[1], processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter)
+            ns.nfSimulation(natA, natB, strategies[0], strategies[1], processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter, recEachSkip=args.eachskip, maxBlock=args.maxblock)
     
     #
     # Computes port distribution function for given NAT and parameters.
@@ -2748,9 +2916,41 @@ if __name__ == "__main__":
     # Poisson process estimators simulation
     #
     if args.proc:
-        ns.processEstimator()
+        ns.processEstimator(rounds=args.rounds)
         print "Process estimation done..."
     
+    #
+    # Netflow benchmark
+    #
+    if args.nfbench and args.nfdump_sorted != None:
+        
+        pathDesc = "_".join(os.path.abspath(args.nfdump_sorted).split('/')[-2:])
+        fname    = pathDesc + '_bench.txt'
+        f = open(fname, 'a+')
+        print "Dumping to file name: ", fname
+        
+        # Iterate for T and strategies, only for sorted, sorry
+        TArr = [10]
+        SArr = ['their', 'i2j', 'poisson', 'simple']
+        for T in TArr:
+            print "="*80
+            for S in SArr:
+                ns.portScanInterval = T
+                strategies=[getStrategy(S,0), getStrategy(S,0)]
+                strategies[0].init(None)
+                strategies[1].init(None)
+                
+                print "S=%s T=%d" % (S, T)
+                ns.compact = args.verbose == 0
+                
+                res = ns.nfSimulation(natA, natB, strategies[0], strategies[1], processedNfdump=args.nfdump_sorted, homeNet=args.hostnet, filt=args.filter, recEachSkip=args.eachskip, maxBlock=args.maxblock)
+                f.write("%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[2])) # python will convert \n to os.linesep
+                f.flush()
+                
+                print "%03.4f|%03.4f|%03.4f|%03.4f\n" % (ns.lmbd, ns.portScanInterval, res[0], res[2])
+                    
+        f.close()
+        
     #
     # Algorithm benchmarking on different lambda to test performance in different environment.
     #
